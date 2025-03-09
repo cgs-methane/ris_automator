@@ -2,5 +2,4 @@ requests
 streamlit
 selenium
 webdriver-manager
-firefox-esr
 geckodriver
