@@ -1,4 +1,7 @@
 import os
+# Disable Streamlit file watcher to prevent inotify watch limit errors.
+os.environ["STREAMLIT_SERVER_FILE_WATCHER"] = "none"
+
 import time
 import shutil
 import requests
