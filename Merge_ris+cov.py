@@ -108,7 +108,16 @@ def download_all_ris_files(article_titles, output_folder):
 #############################
 
 def upload_ris_files_to_covidence(ris_folder_path, covidence_email, covidence_password, review_url):
-    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()))
+    # Set up Chrome options for headless operation and improved compatibility on cloud environments.
+    chrome_options = webdriver.ChromeOptions()
+    chrome_options.add_argument("--headless")
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    
+    driver = webdriver.Chrome(
+        service=Service(ChromeDriverManager().install()),
+        options=chrome_options
+    )
     
     try:
         # Login to Covidence
