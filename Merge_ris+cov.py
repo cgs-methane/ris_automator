@@ -17,13 +17,16 @@ from webdriver_manager.chrome import ChromeDriverManager
 #############################
 
 def find_chrome_binary():
-    # Try using shutil.which first.
+    # First, check for an environment variable (commonly used on some platforms)
+    if "GOOGLE_CHROME_BIN" in os.environ:
+        return os.environ["GOOGLE_CHROME_BIN"]
+    # Try using shutil.which for common binary names.
     possible_binaries = ["google-chrome", "chromium-browser", "chromium"]
     for binary in possible_binaries:
         path = shutil.which(binary)
         if path:
             return path
-    # Fallback: check common file paths.
+    # Fallback: check common installation paths.
     common_paths = ["/usr/bin/chromium-browser", "/usr/bin/chromium", "/usr/bin/google-chrome"]
     for path in common_paths:
         if os.path.exists(path):
@@ -143,7 +146,7 @@ def upload_ris_files_to_covidence(ris_folder_path, covidence_email, covidence_pa
         st.write(f"Using Chrome binary: {chrome_binary}")
         chrome_options.binary_location = chrome_binary
     else:
-        st.error("Chrome or Chromium browser not found on the system. Please ensure one is installed.")
+        st.error("Chrome or Chromium browser not found on the system. Please ensure one is installed and/or set the GOOGLE_CHROME_BIN environment variable.")
         return
 
     try:
