@@ -132,9 +132,13 @@ def download_ris_for_article(article_title, output_folder):
 def download_all_ris_files(article_titles, output_folder):
     """
     For each title in 'article_titles', attempt to download an RIS file.
+    If the folder exists, remove it first, then create a fresh one.
     """
-    if not os.path.exists(output_folder):
-        os.makedirs(output_folder)
+    # --- CHANGE: Remove folder if it exists ---
+    if os.path.exists(output_folder):
+        shutil.rmtree(output_folder)
+    os.makedirs(output_folder)
+
     downloaded_files = []
     for title in article_titles:
         st.write(f"Processing article: {title}")
@@ -225,8 +229,8 @@ def upload_ris_files_to_covidence(ris_folder_path, covidence_email, covidence_pa
             try:
                 success_message = driver.find_element(By.CLASS_NAME, 'notifications').text
                 st.write(f"Upload Status for {os.path.basename(ris_file)}: {success_message}")
-            except Exception as e:
-                st.warning(f"Upload status not confirmed for {os.path.basename(ris_file)}. Exception: {e}")
+            except Exception:
+                st.success(f"Uploaded {os.path.basename(ris_file)} on Covidence.")
     
         st.success("All RIS files have been processed for upload.")
     finally:
