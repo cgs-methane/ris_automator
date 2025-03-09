@@ -215,7 +215,7 @@ def upload_ris_files_to_covidence(ris_folder_path, covidence_email, covidence_pa
         for ris_file in ris_files:
             st.write(f"Uploading {os.path.basename(ris_file)}...")
             driver.get(review_url + '/citation_imports/new')
-            time.sleep(3)
+            time.sleep(6)
     
             select_import_into = Select(driver.find_element(By.NAME, 'citation_import[study_category]'))
             select_import_into.select_by_visible_text('Screen')
@@ -225,7 +225,7 @@ def upload_ris_files_to_covidence(ris_folder_path, covidence_email, covidence_pa
     
             import_button = driver.find_element(By.ID, 'upload-citations')
             import_button.click()
-            time.sleep(5)
+            time.sleep(9)
     
             # Attempt to read the success message
             try:
