@@ -68,10 +68,10 @@ def create_ris_entry(title, authors, year, doi, abstract):
     ris_lines.append("ER  -")
     return "\n".join(ris_lines)
 
-def download_ris_for_article(article_title, output_folder):
+def download_ris_for_article(article_title, output_folder, file_index):
     """
     Search OpenAlex for the first result matching 'article_title',
-    retrieve metadata, generate and save RIS file.
+    retrieve metadata, generate and save RIS file as '{file_index}.ris'.
     """
     search_url = "https://api.openalex.org/works"
     params = {"search": article_title}
@@ -111,9 +111,8 @@ def download_ris_for_article(article_title, output_folder):
     # Build RIS content
     ris_content = create_ris_entry(title, authors, year, doi, abstract)
     
-    # Clean up filename
-    safe_title = "".join(c for c in article_title if c.isalnum() or c in (' ', '_', '-')).rstrip()
-    filename = os.path.join(output_folder, f"{safe_title}.ris")
+    # Use the index-based filename: 1.ris, 2.ris, etc.
+    filename = os.path.join(output_folder, f"{file_index}.ris")
     
     # Save .ris
     try:
@@ -133,6 +132,7 @@ def download_all_ris_files(article_titles, output_folder):
     """
     For each title in 'article_titles', attempt to download an RIS file.
     If the folder exists, remove it first, then create a fresh one.
+    Each downloaded file will be named '1.ris', '2.ris', '3.ris', etc.
     """
     # --- CHANGE: Remove folder if it exists ---
     if os.path.exists(output_folder):
@@ -140,9 +140,11 @@ def download_all_ris_files(article_titles, output_folder):
     os.makedirs(output_folder)
 
     downloaded_files = []
-    for title in article_titles:
+    
+    # Use enumerate so we can name the files as 1.ris, 2.ris, etc.
+    for i, title in enumerate(article_titles, start=1):
         st.write(f"Processing article: {title}")
-        ris_file = download_ris_for_article(title, output_folder)
+        ris_file = download_ris_for_article(title, output_folder, i)
         if ris_file:
             downloaded_files.append(ris_file)
     return downloaded_files

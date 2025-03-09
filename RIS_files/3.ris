@@ -1,0 +1,9 @@
+TY  - JOUR
+TI  - Advanced Leak Detection and Quantification of Methane Emissions Using sUAS
+AU  - Derek Hollenbeck
+AU  - Demitrius Zulevic
+AU  - YangQuan Chen
+PY  - 2021
+DO  - https://doi.org/10.3390/drones5040117
+AB  - Detecting and quantifying methane emissions is gaining an increasingly vital role in mitigating emissions for the oil and gas industry through early detection and repair and will aide our understanding of how emissions in natural ecosystems are playing a role in the global carbon cycle and its impact on the climate. Traditional methods of measuring and quantifying emissions utilize chamber methods, bagging individual equipment, or require the release of a tracer gas. Advanced leak detection techniques have been developed over the past few years, utilizing technologies, such as optical gas imaging, mobile surveyors equipped with sensitive cavity ring down spectroscopy (CRDS), and manned aircraft and satellite approaches. More recently, sUAS-based approaches have been developed to provide, in some ways, cheaper alternatives that also offer sensing advantages to traditional methods, including not being constrained to roadways and being able to access class G airspace (0–400 ft) where manned aviation cannot travel. This work looks at reviewing methods of quantifying methane emissions that can be, or are, carried out using small unmanned aircraft systems (sUAS) as well as traditional methods to provide a clear comparison for future practitioners. This includes the current limitations, capabilities, assumptions, and survey details. The suggested technique for LDAQ depends on the desired accuracy and is a function of the survey time and survey distance. Based on the complexity and precision, the most promising sUAS methods are the near-field Gaussian plume inversion (NGI) and the vertical flux plane (VFP), which have comparable accuracy to those found in conventional state-of-the-art methods.
+ER  -
