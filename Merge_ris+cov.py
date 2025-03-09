@@ -1,4 +1,7 @@
 import os
+# Disable Streamlit file watcher to prevent inotify watch limit errors.
+os.environ["STREAMLIT_SERVER_FILE_WATCHER"] = "none"
+
 import time
 import shutil
 import requests
@@ -6,6 +9,8 @@ import streamlit as st
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import Select
+
+# Use Firefox instead of Chrome
 from selenium.webdriver.firefox.options import Options as FirefoxOptions
 from selenium.webdriver.firefox.service import Service as FirefoxService
 from webdriver_manager.firefox import GeckoDriverManager
@@ -45,6 +50,7 @@ def create_ris_entry(title, authors, year, doi, abstract):
 def download_ris_for_article(article_title, output_folder):
     search_url = "https://api.openalex.org/works"
     params = {"search": article_title}
+    
     try:
         response = requests.get(search_url, params=params)
         response.raise_for_status()
@@ -116,6 +122,15 @@ def upload_ris_files_to_covidence(ris_folder_path, covidence_email, covidence_pa
     firefox_options.add_argument("--disable-dev-shm-usage")
     firefox_options.add_argument("--disable-gpu")
     
+    # Manually set Firefox binary location
+    if os.path.exists("/usr/bin/firefox"):
+        firefox_options.binary_location = "/usr/bin/firefox"
+    elif os.path.exists("/usr/bin/firefox-esr"):
+        firefox_options.binary_location = "/usr/bin/firefox-esr"
+    else:
+        st.error("Firefox binary not found on the system. Please ensure that Firefox is installed (e.g. add firefox-esr to packages.txt).")
+        return
+
     try:
         service = FirefoxService(executable_path=GeckoDriverManager().install())
         driver = webdriver.Firefox(service=service, options=firefox_options)
