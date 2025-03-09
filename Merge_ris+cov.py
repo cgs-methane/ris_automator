@@ -1,7 +1,4 @@
 import os
-# Disable Streamlit file watcher to prevent inotify watch limit errors.
-os.environ["STREAMLIT_SERVER_FILE_WATCHER"] = "none"
-
 import time
 import shutil
 import requests
@@ -9,29 +6,9 @@ import streamlit as st
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import Select
-from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
-
-#############################
-# Helper: Locate Chrome/Chromium Binary
-#############################
-
-def find_chrome_binary():
-    # First, check for an environment variable (commonly used on some platforms)
-    if "GOOGLE_CHROME_BIN" in os.environ:
-        return os.environ["GOOGLE_CHROME_BIN"]
-    # Try using shutil.which for common binary names.
-    possible_binaries = ["google-chrome", "chromium-browser", "chromium"]
-    for binary in possible_binaries:
-        path = shutil.which(binary)
-        if path:
-            return path
-    # Fallback: check common installation paths.
-    common_paths = ["/usr/bin/chromium-browser", "/usr/bin/chromium", "/usr/bin/google-chrome"]
-    for path in common_paths:
-        if os.path.exists(path):
-            return path
-    return None
+from selenium.webdriver.firefox.options import Options as FirefoxOptions
+from selenium.webdriver.firefox.service import Service as FirefoxService
+from webdriver_manager.firefox import GeckoDriverManager
 
 #############################
 # Section 1: RIS Download Functions
@@ -68,7 +45,6 @@ def create_ris_entry(title, authors, year, doi, abstract):
 def download_ris_for_article(article_title, output_folder):
     search_url = "https://api.openalex.org/works"
     params = {"search": article_title}
-    
     try:
         response = requests.get(search_url, params=params)
         response.raise_for_status()
@@ -129,33 +105,22 @@ def download_all_ris_files(article_titles, output_folder):
     return downloaded_files
 
 #############################
-# Section 2: Covidence Upload Functions
+# Section 2: Covidence Upload Functions (Using Firefox)
 #############################
 
 def upload_ris_files_to_covidence(ris_folder_path, covidence_email, covidence_password, review_url):
-    # Set up Chrome options with headless mode and cloud-friendly arguments.
-    chrome_options = webdriver.ChromeOptions()
-    chrome_options.add_argument("--headless")
-    chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("--disable-gpu")
-    chrome_options.add_argument("--remote-debugging-port=9222")
+    # Set up Firefox options for headless operation in cloud environments.
+    firefox_options = FirefoxOptions()
+    firefox_options.add_argument("--headless")
+    firefox_options.add_argument("--no-sandbox")
+    firefox_options.add_argument("--disable-dev-shm-usage")
+    firefox_options.add_argument("--disable-gpu")
     
-    chrome_binary = find_chrome_binary()
-    if chrome_binary:
-        st.write(f"Using Chrome binary: {chrome_binary}")
-        chrome_options.binary_location = chrome_binary
-    else:
-        st.error("Chrome or Chromium browser not found on the system. Please ensure one is installed and/or set the GOOGLE_CHROME_BIN environment variable.")
-        return
-
     try:
-        driver = webdriver.Chrome(
-            service=Service(ChromeDriverManager().install()),
-            options=chrome_options
-        )
+        service = FirefoxService(executable_path=GeckoDriverManager().install())
+        driver = webdriver.Firefox(service=service, options=firefox_options)
     except Exception as e:
-        st.error(f"Error initializing Chrome WebDriver: {e}")
+        st.error(f"Error initializing Firefox WebDriver: {e}")
         return
     
     try:
@@ -209,7 +174,6 @@ def upload_ris_files_to_covidence(ris_folder_path, covidence_email, covidence_pa
 #############################
 
 st.title("RIS Download and Covidence Upload Pipeline")
-
 st.markdown("""
 This app downloads RIS files for a list of article titles from the OpenAlex API and uploads them to Covidence.
 Please provide the required inputs below.
