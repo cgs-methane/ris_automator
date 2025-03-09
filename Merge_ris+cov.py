@@ -1,5 +1,6 @@
 import os
 import time
+import shutil
 import requests
 import streamlit as st
 from selenium import webdriver
@@ -108,16 +109,35 @@ def download_all_ris_files(article_titles, output_folder):
 #############################
 
 def upload_ris_files_to_covidence(ris_folder_path, covidence_email, covidence_password, review_url):
-    # Set up Chrome options for headless operation and improved compatibility on cloud environments.
+    # Set up Chrome options with headless mode and extra arguments for cloud environments.
     chrome_options = webdriver.ChromeOptions()
     chrome_options.add_argument("--headless")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--disable-gpu")
+    chrome_options.add_argument("--remote-debugging-port=9222")
     
-    driver = webdriver.Chrome(
-        service=Service(ChromeDriverManager().install()),
-        options=chrome_options
-    )
+    # Try to automatically locate the Chrome/Chromium binary.
+    possible_binaries = ["google-chrome", "chromium-browser", "chromium"]
+    chrome_binary = None
+    for binary in possible_binaries:
+        chrome_binary = shutil.which(binary)
+        if chrome_binary:
+            st.write(f"Using Chrome binary: {chrome_binary}")
+            chrome_options.binary_location = chrome_binary
+            break
+    if not chrome_binary:
+        st.error("Chrome or Chromium browser not found on the system. Please ensure one is installed.")
+        return
+
+    try:
+        driver = webdriver.Chrome(
+            service=Service(ChromeDriverManager().install()),
+            options=chrome_options
+        )
+    except Exception as e:
+        st.error(f"Error initializing Chrome WebDriver: {e}")
+        return
     
     try:
         # Login to Covidence
