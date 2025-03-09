@@ -1,7 +1,5 @@
 import os
-# Disable Streamlit file watcher to prevent inotify watch limit errors.
-os.environ["STREAMLIT_SERVER_FILE_WATCHER"] = "none"
-
+import sys
 import time
 import shutil
 import requests
@@ -16,10 +14,30 @@ from selenium.webdriver.firefox.service import Service as FirefoxService
 from webdriver_manager.firefox import GeckoDriverManager
 
 #############################
+# Utility: Ensure Firefox is available
+#############################
+def find_firefox_binary():
+    """
+    Check common places for Firefox or Firefox-ESR. 
+    Return the path if found, otherwise return None.
+    """
+    # Check environment for both firefox-esr and firefox
+    possible_bins = ["firefox-esr", "firefox"]
+    for bin_name in possible_bins:
+        bin_path = shutil.which(bin_name)
+        if bin_path:
+            return bin_path
+    return None
+
+#############################
 # Section 1: RIS Download Functions
 #############################
 
 def reconstruct_abstract(inverted_index):
+    """
+    Given an abstract_inverted_index from OpenAlex,
+    reconstruct the abstract text.
+    """
     positions = []
     for word, indices in inverted_index.items():
         positions.extend(indices)
@@ -33,6 +51,9 @@ def reconstruct_abstract(inverted_index):
     return " ".join(abstract_words)
 
 def create_ris_entry(title, authors, year, doi, abstract):
+    """
+    Format the retrieved metadata into a RIS entry (TY = JOUR).
+    """
     ris_lines = []
     ris_lines.append("TY  - JOUR")
     ris_lines.append(f"TI  - {title}")
@@ -48,9 +69,14 @@ def create_ris_entry(title, authors, year, doi, abstract):
     return "\n".join(ris_lines)
 
 def download_ris_for_article(article_title, output_folder):
+    """
+    Search OpenAlex for the first result matching 'article_title',
+    retrieve metadata, generate and save RIS file.
+    """
     search_url = "https://api.openalex.org/works"
     params = {"search": article_title}
     
+    # Query OpenAlex
     try:
         response = requests.get(search_url, params=params)
         response.raise_for_status()
@@ -63,6 +89,7 @@ def download_ris_for_article(article_title, output_folder):
         st.warning(f"No results found for '{article_title}'.")
         return None
     
+    # Take the first result
     first_result = data["results"][0]
     title = first_result.get("display_name", "No Title")
     doi = first_result.get("doi", None)
@@ -81,11 +108,14 @@ def download_ris_for_article(article_title, output_folder):
     
     st.info(f"Found article: {title} ({year})")
     
+    # Build RIS content
     ris_content = create_ris_entry(title, authors, year, doi, abstract)
     
+    # Clean up filename
     safe_title = "".join(c for c in article_title if c.isalnum() or c in (' ', '_', '-')).rstrip()
     filename = os.path.join(output_folder, f"{safe_title}.ris")
     
+    # Save .ris
     try:
         with open(filename, "w", encoding="utf-8") as file:
             file.write(ris_content)
@@ -100,6 +130,9 @@ def download_ris_for_article(article_title, output_folder):
         return None
 
 def download_all_ris_files(article_titles, output_folder):
+    """
+    For each title in 'article_titles', attempt to download an RIS file.
+    """
     if not os.path.exists(output_folder):
         os.makedirs(output_folder)
     downloaded_files = []
@@ -115,22 +148,28 @@ def download_all_ris_files(article_titles, output_folder):
 #############################
 
 def upload_ris_files_to_covidence(ris_folder_path, covidence_email, covidence_password, review_url):
-    # Set up Firefox options for headless operation in cloud environments.
+    """
+    Launch Firefox in headless mode, log into Covidence, 
+    and upload each RIS file.
+    """
+    # Check for Firefox
+    firefox_path = find_firefox_binary()
+    if not firefox_path:
+        st.error(
+            "Firefox binary not found on this system.\n"
+            "Please ensure firefox-esr is added to packages.txt."
+        )
+        return
+
+    # Set up Firefox options for headless operation
     firefox_options = FirefoxOptions()
     firefox_options.add_argument("--headless")
     firefox_options.add_argument("--no-sandbox")
     firefox_options.add_argument("--disable-dev-shm-usage")
     firefox_options.add_argument("--disable-gpu")
+    firefox_options.binary_location = firefox_path
     
-    # Manually set Firefox binary location
-    if os.path.exists("/usr/bin/firefox"):
-        firefox_options.binary_location = "/usr/bin/firefox"
-    elif os.path.exists("/usr/bin/firefox-esr"):
-        firefox_options.binary_location = "/usr/bin/firefox-esr"
-    else:
-        st.error("Firefox binary not found on the system. Please ensure that Firefox is installed (e.g. add firefox-esr to packages.txt).")
-        return
-
+    # Initialize the WebDriver
     try:
         service = FirefoxService(executable_path=GeckoDriverManager().install())
         driver = webdriver.Firefox(service=service, options=firefox_options)
@@ -139,11 +178,12 @@ def upload_ris_files_to_covidence(ris_folder_path, covidence_email, covidence_pa
         return
     
     try:
-        # Login to Covidence
-        driver.get('https://app.covidence.org/sign_in')
+        # 1. Go to Covidence sign-in page
+        driver.get("https://app.covidence.org/sign_in")
         driver.maximize_window()
         time.sleep(3)
-    
+        
+        # 2. Fill out login form
         email_field = driver.find_element(By.ID, 'session_email')
         email_field.send_keys(covidence_email)
     
@@ -154,13 +194,20 @@ def upload_ris_files_to_covidence(ris_folder_path, covidence_email, covidence_pa
         sign_in_button.click()
         time.sleep(5)
     
+        # 3. Open your review page
         driver.get(review_url)
         time.sleep(3)
     
-        ris_files = [os.path.join(ris_folder_path, f) for f in os.listdir(ris_folder_path) if f.lower().endswith('.ris')]
-    
+        # 4. Get list of all local RIS files
+        ris_files = [
+            os.path.join(ris_folder_path, f) 
+            for f in os.listdir(ris_folder_path) 
+            if f.lower().endswith('.ris')
+        ]
+        
+        # 5. For each RIS file, go to 'Import references' page, upload, submit
         for ris_file in ris_files:
-            st.write(f"Uploading {os.path.basename(ris_file)}")
+            st.write(f"Uploading {os.path.basename(ris_file)}...")
             driver.get(review_url + '/citation_imports/new')
             time.sleep(3)
     
@@ -174,6 +221,7 @@ def upload_ris_files_to_covidence(ris_folder_path, covidence_email, covidence_pa
             import_button.click()
             time.sleep(5)
     
+            # Attempt to read the success message
             try:
                 success_message = driver.find_element(By.CLASS_NAME, 'notifications').text
                 st.write(f"Upload Status for {os.path.basename(ris_file)}: {success_message}")
@@ -188,25 +236,45 @@ def upload_ris_files_to_covidence(ris_folder_path, covidence_email, covidence_pa
 # Section 3: Streamlit Interface
 #############################
 
-st.title("RIS Download and Covidence Upload Pipeline")
-st.markdown("""
-This app downloads RIS files for a list of article titles from the OpenAlex API and uploads them to Covidence.
-Please provide the required inputs below.
-""")
+def main():
+    st.title("RIS Download and Covidence Upload Pipeline")
+    st.markdown("""
+    This app downloads RIS files for a list of article titles from the OpenAlex API 
+    and uploads them to Covidence.
+    
+    **Instructions**:
+    1. Enter one article title per line in the text area.
+    2. Provide Covidence email and password.
+    3. Provide your Covidence review URL (e.g. `https://app.covidence.org/reviews/12345`).
+    4. Press 'Run Pipeline'.
+    """)
 
-# Input for article titles (one per line)
-article_titles_input = st.text_area("Enter article titles (one per line):")
-covidence_email = st.text_input("Covidence Email")
-covidence_password = st.text_input("Covidence Password", type="password")
-review_url = st.text_input("Review URL", value="https://app.covidence.org/reviews/your_review_id")
-
-if st.button("Run Pipeline"):
-    if not article_titles_input.strip():
-        st.error("Please enter at least one article title.")
-    elif not covidence_email or not covidence_password or not review_url:
-        st.error("Please fill in all Covidence credentials and the review URL.")
-    else:
-        article_titles = [title.strip() for title in article_titles_input.splitlines() if title.strip()]
+    # 1. Input for article titles (one per line)
+    article_titles_input = st.text_area("Enter article titles (one per line):")
+    
+    # 2. Covidence credentials
+    covidence_email = st.text_input("Covidence Email")
+    covidence_password = st.text_input("Covidence Password", type="password")
+    
+    # 3. Covidence review URL (replace 'your_review_id' with your actual ID)
+    review_url = st.text_input("Review URL", value="https://app.covidence.org/reviews/your_review_id")
+    
+    # Run the pipeline
+    if st.button("Run Pipeline"):
+        if not article_titles_input.strip():
+            st.error("Please enter at least one article title.")
+            return
+        
+        if not covidence_email or not covidence_password or not review_url:
+            st.error("Please fill in Covidence credentials and review URL.")
+            return
+        
+        article_titles = [
+            title.strip() for title in article_titles_input.splitlines() 
+            if title.strip()
+        ]
+        
+        # Where to store .ris files
         RIS_FOLDER_PATH = os.path.join(os.getcwd(), "RIS_files")
         
         st.header("Step 1: Downloading RIS Files")
@@ -217,6 +285,8 @@ if st.button("Run Pipeline"):
             
             st.header("Step 2: Uploading to Covidence")
             upload_ris_files_to_covidence(RIS_FOLDER_PATH, covidence_email, covidence_password, review_url)
-            st.success("Covidence upload completed.")
         else:
             st.error("No RIS files were downloaded. Check the article titles and try again.")
+
+if __name__ == "__main__":
+    main()

@@ -1,5 +1,4 @@
-requests
 streamlit
 selenium
 webdriver-manager
-geckodriver
+requests
