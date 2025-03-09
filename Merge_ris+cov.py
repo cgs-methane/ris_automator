@@ -13,6 +13,24 @@ from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
 
 #############################
+# Helper: Locate Chrome/Chromium Binary
+#############################
+
+def find_chrome_binary():
+    # Try using shutil.which first.
+    possible_binaries = ["google-chrome", "chromium-browser", "chromium"]
+    for binary in possible_binaries:
+        path = shutil.which(binary)
+        if path:
+            return path
+    # Fallback: check common file paths.
+    common_paths = ["/usr/bin/chromium-browser", "/usr/bin/chromium", "/usr/bin/google-chrome"]
+    for path in common_paths:
+        if os.path.exists(path):
+            return path
+    return None
+
+#############################
 # Section 1: RIS Download Functions
 #############################
 
@@ -112,7 +130,7 @@ def download_all_ris_files(article_titles, output_folder):
 #############################
 
 def upload_ris_files_to_covidence(ris_folder_path, covidence_email, covidence_password, review_url):
-    # Set up Chrome options with headless mode and extra arguments for cloud environments.
+    # Set up Chrome options with headless mode and cloud-friendly arguments.
     chrome_options = webdriver.ChromeOptions()
     chrome_options.add_argument("--headless")
     chrome_options.add_argument("--no-sandbox")
@@ -120,16 +138,11 @@ def upload_ris_files_to_covidence(ris_folder_path, covidence_email, covidence_pa
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--remote-debugging-port=9222")
     
-    # Try to automatically locate the Chrome/Chromium binary.
-    possible_binaries = ["google-chrome", "chromium-browser", "chromium"]
-    chrome_binary = None
-    for binary in possible_binaries:
-        chrome_binary = shutil.which(binary)
-        if chrome_binary:
-            st.write(f"Using Chrome binary: {chrome_binary}")
-            chrome_options.binary_location = chrome_binary
-            break
-    if not chrome_binary:
+    chrome_binary = find_chrome_binary()
+    if chrome_binary:
+        st.write(f"Using Chrome binary: {chrome_binary}")
+        chrome_options.binary_location = chrome_binary
+    else:
         st.error("Chrome or Chromium browser not found on the system. Please ensure one is installed.")
         return
 
