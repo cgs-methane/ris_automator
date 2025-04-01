@@ -1,25 +1,42 @@
 import os
+import re
 import sys
 import time
 import shutil
 import requests
+import io
+import csv
+import zipfile
+import base64
 import streamlit as st
+import streamlit.components.v1 as components
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import Select
+from selenium.common.exceptions import NoSuchElementException, ElementClickInterceptedException
+from selenium.webdriver.common.action_chains import ActionChains
 
 # Use Firefox instead of Chrome
 from selenium.webdriver.firefox.options import Options as FirefoxOptions
 from selenium.webdriver.firefox.service import Service as FirefoxService
 from webdriver_manager.firefox import GeckoDriverManager
 
-#############################
-# Utility: Ensure Firefox is available
-#############################
+# -------------------------------------------------------------------
+# Set Streamlit config for larger messages (e.g. for large downloads)
+# -------------------------------------------------------------------
+config_dir = os.path.join(os.getcwd(), ".streamlit")
+if not os.path.exists(config_dir):
+    os.makedirs(config_dir)
+config_file = os.path.join(config_dir, "config.toml")
+with open(config_file, "w") as f:
+    f.write("[server]\nmaxMessageSize = 600\n")
+
+# -------------------------------------------------------------------
+# Utility: Find Firefox Binary (used by both pipelines)
+# -------------------------------------------------------------------
 def find_firefox_binary():
     """
-    Check common places for Firefox or Firefox-ESR. 
-    Return the path if found, otherwise return None.
+    Check common names for Firefox or Firefox-ESR and return the binary path.
     """
     possible_bins = ["firefox-esr", "firefox"]
     for bin_name in possible_bins:
@@ -28,15 +45,13 @@ def find_firefox_binary():
             return bin_path
     return None
 
+# -------------------------------------------------------------------
+# ===================== Pipeline 1: RIS Download & Upload =====================
+# -------------------------------------------------------------------
 #############################
-# Section 1: RIS Download Functions
+# Reconstruct abstract text from inverted index
 #############################
-
 def reconstruct_abstract(inverted_index):
-    """
-    Given an abstract_inverted_index from OpenAlex,
-    reconstruct the abstract text.
-    """
     positions = []
     for word, indices in inverted_index.items():
         positions.extend(indices)
@@ -49,10 +64,10 @@ def reconstruct_abstract(inverted_index):
             abstract_words[index] = word
     return " ".join(abstract_words)
 
+#############################
+# Create RIS entry from metadata
+#############################
 def create_ris_entry(title, authors, year, doi, abstract):
-    """
-    Format the retrieved metadata into a RIS entry (TY = JOUR).
-    """
     ris_lines = []
     ris_lines.append("TY  - JOUR")
     ris_lines.append(f"TI  - {title}")
@@ -67,11 +82,10 @@ def create_ris_entry(title, authors, year, doi, abstract):
     ris_lines.append("ER  -")
     return "\n".join(ris_lines)
 
+#############################
+# Download RIS file for one article via OpenAlex
+#############################
 def download_ris_for_article(article_title, output_folder, file_index):
-    """
-    Search OpenAlex for the first result matching 'article_title',
-    retrieve metadata, generate and save RIS file as '{file_index}.ris'.
-    """
     search_url = "https://api.openalex.org/works"
     params = {"search": article_title}
     
@@ -105,9 +119,7 @@ def download_ris_for_article(article_title, output_folder, file_index):
         abstract = reconstruct_abstract(first_result["abstract_inverted_index"])
     
     st.info(f"Found article: {title} ({year})")
-    
     ris_content = create_ris_entry(title, authors, year, doi, abstract)
-    
     filename = os.path.join(output_folder, f"{file_index}.ris")
     
     try:
@@ -123,16 +135,13 @@ def download_ris_for_article(article_title, output_folder, file_index):
     else:
         return None
 
+#############################
+# Download all RIS files for provided article titles
+#############################
 def download_all_ris_files(article_titles, output_folder):
-    """
-    For each title in 'article_titles', attempt to download an RIS file.
-    If the folder exists, remove it first, then create a fresh one.
-    Each downloaded file will be named '1.ris', '2.ris', etc.
-    """
     if os.path.exists(output_folder):
         shutil.rmtree(output_folder)
     os.makedirs(output_folder)
-
     downloaded_files = []
     for i, title in enumerate(article_titles, start=1):
         st.write(f"Processing article: {title}")
@@ -142,20 +151,12 @@ def download_all_ris_files(article_titles, output_folder):
     return downloaded_files
 
 #############################
-# Section 2: Covidence Automation Functions (Using Firefox)
+# Upload RIS files to Covidence using Firefox (headless)
 #############################
-
 def upload_ris_files_to_covidence(ris_folder_path, covidence_email, covidence_password, review_url):
-    """
-    Launch Firefox in headless mode, log into Covidence, 
-    and upload each RIS file.
-    """
     firefox_path = find_firefox_binary()
     if not firefox_path:
-        st.error(
-            "Firefox binary not found on this system.\n"
-            "Please ensure firefox-esr is added to packages.txt."
-        )
+        st.error("Firefox binary not found on this system. Please ensure firefox-esr is installed.")
         return
 
     firefox_options = FirefoxOptions()
@@ -164,7 +165,9 @@ def upload_ris_files_to_covidence(ris_folder_path, covidence_email, covidence_pa
     firefox_options.add_argument("--disable-dev-shm-usage")
     firefox_options.add_argument("--disable-gpu")
     firefox_options.binary_location = firefox_path
-    
+    # firefox_options.binary_location = "/Applications/Firefox.app/Contents/MacOS/firefox"
+
+
     try:
         service = FirefoxService(executable_path=GeckoDriverManager().install())
         driver = webdriver.Firefox(service=service, options=firefox_options)
@@ -176,193 +179,301 @@ def upload_ris_files_to_covidence(ris_folder_path, covidence_email, covidence_pa
         driver.get("https://app.covidence.org/sign_in")
         driver.maximize_window()
         time.sleep(3)
-        
         email_field = driver.find_element(By.ID, 'session_email')
         email_field.send_keys(covidence_email)
-    
         password_field = driver.find_element(By.NAME, 'session[password]')
         password_field.send_keys(covidence_password)
-    
         sign_in_button = driver.find_element(By.XPATH, '//form[@action="/session"]//input[@type="submit"]')
         sign_in_button.click()
         time.sleep(5)
-    
         driver.get(review_url)
         time.sleep(3)
-    
-        ris_files = [
-            os.path.join(ris_folder_path, f) 
-            for f in os.listdir(ris_folder_path) 
-            if f.lower().endswith('.ris')
-        ]
+        
+        ris_files = [os.path.join(ris_folder_path, f)
+                     for f in os.listdir(ris_folder_path)
+                     if f.lower().endswith('.ris')]
         
         for ris_file in ris_files:
             st.write(f"Uploading {os.path.basename(ris_file)}...")
             driver.get(review_url + '/citation_imports/new')
             time.sleep(3)
-    
             select_import_into = Select(driver.find_element(By.NAME, 'citation_import[study_category]'))
             select_import_into.select_by_visible_text('Screen')
-    
             upload_field = driver.find_element(By.ID, 'citation_import_file')
             upload_field.send_keys(ris_file)
-    
             import_button = driver.find_element(By.ID, 'upload-citations')
             import_button.click()
             time.sleep(5)
-    
             try:
                 success_message = driver.find_element(By.CLASS_NAME, 'notifications').text
                 st.write(f"Upload Status for {os.path.basename(ris_file)}: {success_message}")
             except Exception:
                 st.success(f"Uploaded {os.path.basename(ris_file)} on Covidence.")
-    
         st.success("All RIS files have been processed for upload.")
     finally:
         driver.quit()
 
-def scrape_and_download_ris_from_covidence(review_url, covidence_email, covidence_password, output_folder):
+# -------------------------------------------------------------------
+# ===================== Pipeline 2: PDF Extraction =====================
+# -------------------------------------------------------------------
+#########################################
+# Helper: Sanitize Filename for PDFs
+#########################################
+def sanitize_filename(name):
+    sanitized = re.sub(r'[^\w\-\.\ ]+', '', name)
+    return sanitized.strip().replace(" ", "_")
+
+#########################################
+# Function: Trigger Automatic Download via JavaScript
+#########################################
+def trigger_download(data, filename, mime_type):
+    if isinstance(data, bytes):
+        b64 = base64.b64encode(data).decode()
+    else:
+        b64 = base64.b64encode(data.encode()).decode()
+    href = f"data:{mime_type};base64,{b64}"
+    html = f"""
+    <html>
+      <body>
+        <a id="download_link" href="{href}" download="{filename}"></a>
+        <script>
+          document.getElementById('download_link').click();
+        </script>
+      </body>
+    </html>
     """
-    Log in to Covidence, navigate to the given review,
-    click on the 'extracted' studies link, click 'Load more' until all studies
-    are visible, scrape the paper names, and download each RIS file from OpenAlex.
-    """
+    components.html(html, height=0, width=0)
+
+#########################################
+# Download PDF from a study element in Covidence
+#########################################
+def download_pdf_from_study_element(driver, study_element, file_index):
+    try:
+        inner_load_more = study_element.find_element(By.XPATH, ".//button[contains(., 'Load more')]")
+        driver.execute_script("arguments[0].scrollIntoView({block: 'center', inline: 'center'});", inner_load_more)
+        time.sleep(1)
+        inner_load_more.click()
+        st.write("Clicked inner 'Load more' for study.")
+        time.sleep(2)
+    except NoSuchElementException:
+        pass
+
+    try:
+        view_button = study_element.find_element(By.CSS_SELECTOR, "button.css-wetlpj")
+        driver.execute_script("arguments[0].scrollIntoView({block: 'center', inline: 'center'});", view_button)
+        time.sleep(1)
+        driver.execute_script("arguments[0].click();", view_button)
+        st.write("Clicked 'View full text' button.")
+        time.sleep(2)
+    except Exception as e:
+        st.error(f"Error clicking 'View full text' button: {e}")
+        title = f"document_{file_index}"
+        return (sanitize_filename(title), None)
+
+    try:
+        title_elem = study_element.find_element(By.CSS_SELECTOR, "h2.webpack-concepts-Extraction-StudyList-StudyReference-module__title")
+        title = title_elem.text.strip()
+        if not title:
+            title = f"document_{file_index}"
+    except Exception as e:
+        st.warning(f"Could not retrieve title from study; using index instead: {e}")
+        title = f"document_{file_index}"
+    sanitized_title = sanitize_filename(title)
+
+    try:
+        pdf_link_element = study_element.find_element(
+            By.CSS_SELECTOR, "li.webpack-concepts-Extraction-StudyList-Documents-module__documentContainer a"
+        )
+        pdf_url = pdf_link_element.get_attribute("href")
+    except Exception as e:
+        st.error(f"Error locating PDF link: {e}")
+        pdf_url = None
+
+    if not pdf_url:
+        st.warning("No PDF URL found in study element.")
+        return (sanitized_title, None)
+
+    try:
+        pdf_response = requests.get(pdf_url)
+        pdf_response.raise_for_status()
+        pdf_bytes = pdf_response.content
+    except Exception as e:
+        st.error(f"Error downloading PDF from {pdf_url}: {e}")
+        return (sanitized_title, None)
+
+    st.success(f"PDF for '{sanitized_title}' downloaded successfully.")
+    return (sanitized_title, pdf_bytes)
+
+#########################################
+# Extract and download PDFs from Covidence
+#########################################
+def extract_and_download_pdfs_from_covidence(covidence_email, covidence_password, review_url):
     firefox_path = find_firefox_binary()
     if not firefox_path:
-        st.error(
-            "Firefox binary not found on this system.\n"
-            "Please ensure firefox-esr is added to packages.txt."
-        )
-        return
-
+        st.error("Firefox binary not found on this system. Please ensure firefox-esr is installed.")
+        return {}, []
+    
     firefox_options = FirefoxOptions()
+    # Uncomment below to run headless (if desired)
     firefox_options.add_argument("--headless")
     firefox_options.add_argument("--no-sandbox")
     firefox_options.add_argument("--disable-dev-shm-usage")
     firefox_options.add_argument("--disable-gpu")
     firefox_options.binary_location = firefox_path
+    # firefox_options.binary_location = "/Applications/Firefox.app/Contents/MacOS/firefox"
+
 
     try:
         service = FirefoxService(executable_path=GeckoDriverManager().install())
         driver = webdriver.Firefox(service=service, options=firefox_options)
     except Exception as e:
         st.error(f"Error initializing Firefox WebDriver: {e}")
-        return
-    
+        return {}, []
+
+    downloaded_pdfs = {}
+    failed_papers = []
     try:
-        # Log into Covidence
         driver.get("https://app.covidence.org/sign_in")
         driver.maximize_window()
         time.sleep(3)
-        driver.find_element(By.ID, 'session_email').send_keys(covidence_email)
-        driver.find_element(By.NAME, 'session[password]').send_keys(covidence_password)
-        driver.find_element(By.XPATH, '//form[@action="/session"]//input[@type="submit"]').click()
+        email_field = driver.find_element(By.ID, 'session_email')
+        email_field.send_keys(covidence_email)
+        password_field = driver.find_element(By.NAME, 'session[password]')
+        password_field.send_keys(covidence_password)
+        sign_in_button = driver.find_element(By.XPATH, '//form[@action="/session"]//input[@type="submit"]')
+        sign_in_button.click()
         time.sleep(5)
-        
-        # Navigate to the review page
+
         driver.get(review_url)
         time.sleep(3)
-        
-        # Click the "extracted" studies link (e.g., the link with '?filter=complete')
         try:
-            extracted_link = driver.find_element(By.XPATH, "//a[contains(@href, '/review_studies/included?filter=complete')]")
+            extracted_link = driver.find_element(By.PARTIAL_LINK_TEXT, "extracted")
             extracted_link.click()
-            time.sleep(3)
+            st.info("Navigated to extracted studies.")
         except Exception as e:
-            st.error("Could not find the extracted studies link: " + str(e))
-            return
-        
-        # Click "Load more" repeatedly until no button is found
+            st.error(f"Error clicking on the extracted studies link: {e}")
+            return downloaded_pdfs, failed_papers
+        time.sleep(3)
+
         while True:
             try:
-                load_more_button = driver.find_element(By.XPATH, "//button[contains(text(),'Load more')]")
+                load_more_button = driver.find_element(By.XPATH, "//button[contains(., 'Load more')]")
+                driver.execute_script("arguments[0].scrollIntoView({block: 'center', inline: 'center'});", load_more_button)
+                time.sleep(1)
                 load_more_button.click()
+                st.write("Clicked global 'Load more' to reveal additional studies.")
                 time.sleep(3)
-            except Exception:
-                break  # No more "Load more" button found
+            except NoSuchElementException:
+                st.info("No more global 'Load more' button found.")
+                break
+            except Exception as e:
+                st.warning(f"Error clicking global 'Load more': {e}")
+                time.sleep(3)
 
-        # Scrape paper names from the loaded list.
-        # (Note: adjust the selector based on the actual page structure.)
-        paper_elements = driver.find_elements(By.XPATH, "//div[contains(@class, 'Extraction-StudyList') and contains(@class, 'item')]")
-        paper_names = [elem.text.strip() for elem in paper_elements if elem.text.strip() != ""]
-        # Remove duplicates
-        paper_names = list(set(paper_names))
-        st.write(f"Found {len(paper_names)} extracted papers:")
-        for name in paper_names:
-            st.write(name)
-        
-        # Create output folder for RIS files (remove if exists)
-        if os.path.exists(output_folder):
-            shutil.rmtree(output_folder)
-        os.makedirs(output_folder)
-        
-        # Download RIS for each paper from OpenAlex
-        downloaded_files = []
-        for i, paper in enumerate(paper_names, start=1):
-            st.write(f"Downloading RIS for paper: {paper}")
-            ris_file = download_ris_for_article(paper, output_folder, i)
-            if ris_file:
-                downloaded_files.append(ris_file)
-        
-        if downloaded_files:
-            st.success("Downloaded RIS files for extracted papers.")
-        else:
-            st.warning("No RIS files were downloaded for extracted papers.")
+        study_elements = driver.find_elements(By.CSS_SELECTOR, "article[class*='StudyListItem']")
+        if not study_elements:
+            st.error("No study elements found. Please check your CSS selector.")
+            return downloaded_pdfs, failed_papers
+
+        for i, study in enumerate(study_elements, start=1):
+            st.write(f"Processing study {i}...")
+            title, pdf_bytes = download_pdf_from_study_element(driver, study, i)
+            if pdf_bytes:
+                downloaded_pdfs[title + ".pdf"] = pdf_bytes
+            else:
+                failed_papers.append(title + ".pdf")
     finally:
         driver.quit()
+    return downloaded_pdfs, failed_papers
 
-#############################
-# Section 3: Streamlit Interface
-#############################
-
+# -------------------------------------------------------------------
+# ===================== Streamlit Interface =====================
+# -------------------------------------------------------------------
 def main():
-    st.title("RIS Download and Covidence Automation Pipeline")
+    st.title("RIS & Covidence Pipeline Tool")
     st.markdown("""
-    This app downloads RIS files from the OpenAlex API and automates Covidence operations.
+    This application provides two pipelines:
     
-    **Instructions**:
-    1. You can either provide a list of article titles (one per line) to download RIS files manually **or**
-       choose to scrape the extracted papers from your Covidence review page.
-    2. Provide your Covidence email, password, and review URL.
-    3. For manual download, enter one article title per line and press 'Run Manual RIS Download'.
-       For scraping, press 'Scrape & Download RIS from Covidence'.
+    **Pipeline 1:** Download RIS files from OpenAlex and upload them to Covidence.  
+    **Pipeline 2:** Extract PDFs from Covidence and automatically download a ZIP (with a CSV for failures, if any).
     """)
-
-    # Common Covidence credentials and review URL
-    covidence_email = st.text_input("Covidence Email")
-    covidence_password = st.text_input("Covidence Password", type="password")
-    review_url = st.text_input("Review URL", value="https://app.covidence.org/reviews/your_review_id")
     
-    # Option 1: Manual RIS file download (using OpenAlex search)
-    st.header("Option 1: Manual RIS Download")
-    article_titles_input = st.text_area("Enter article titles (one per line):")
-    if st.button("Run Manual RIS Download"):
-        if not article_titles_input.strip():
-            st.error("Please enter at least one article title.")
-        elif not covidence_email or not covidence_password or not review_url:
-            st.error("Please fill in Covidence credentials and review URL.")
-        else:
+    tab1, tab2 = st.tabs(["Pipeline 1: RIS Files", "Pipeline 2: PDF Extraction"])
+    
+    # ------------------- Pipeline 1: RIS Files -------------------
+    with tab1:
+        st.header("Pipeline 1: RIS Download and Covidence Upload")
+        st.markdown("""
+        **Instructions:**
+        1. Enter one article title per line.
+        2. Provide your Covidence credentials and review URL.
+        3. The app will query OpenAlex for metadata, generate RIS files, and then upload them to Covidence.
+        """)
+        article_titles_input = st.text_area("Enter article titles (one per line):")
+        covidence_email = st.text_input("Covidence Email", key="ris_email")
+        covidence_password = st.text_input("Covidence Password", type="password", key="ris_password")
+        review_url = st.text_input("Review URL", value="https://app.covidence.org/reviews/your_review_id", key="ris_review")
+        
+        if st.button("Run RIS Pipeline"):
+            if not article_titles_input.strip():
+                st.error("Please enter at least one article title.")
+                return
+            if not covidence_email or not covidence_password or not review_url:
+                st.error("Please fill in Covidence credentials and review URL.")
+                return
+            
             article_titles = [title.strip() for title in article_titles_input.splitlines() if title.strip()]
-            RIS_FOLDER_PATH = os.path.join(os.getcwd(), "RIS_files_manual")
+            RIS_FOLDER_PATH = os.path.join(os.getcwd(), "RIS_files")
+            
             st.header("Step 1: Downloading RIS Files")
             downloaded_files = download_all_ris_files(article_titles, RIS_FOLDER_PATH)
             if downloaded_files:
                 st.success("RIS file download completed.")
-                st.header("Step 2: (Optional) Uploading to Covidence")
+                st.header("Step 2: Uploading to Covidence")
                 upload_ris_files_to_covidence(RIS_FOLDER_PATH, covidence_email, covidence_password, review_url)
             else:
-                st.error("No RIS files were downloaded. Check the article titles and try again.")
+                st.error("No RIS files were downloaded. Please check the article titles and try again.")
     
-    st.markdown("---")
-    
-    # Option 2: Scrape extracted papers from Covidence and download RIS files using OpenAlex
-    st.header("Option 2: Scrape & Download RIS from Covidence Extracted Papers")
-    if st.button("Scrape & Download RIS from Covidence"):
-        if not covidence_email or not covidence_password or not review_url:
-            st.error("Please fill in Covidence credentials and review URL.")
-        else:
-            RIS_FOLDER_PATH = os.path.join(os.getcwd(), "RIS_files_extracted")
-            scrape_and_download_ris_from_covidence(review_url, covidence_email, covidence_password, RIS_FOLDER_PATH)
+    # ------------------- Pipeline 2: PDF Extraction -------------------
+    with tab2:
+        st.header("Pipeline 2: PDF Extraction from Covidence")
+        st.markdown("""
+        **Instructions:**
+        1. Enter your Covidence credentials and review URL.
+        2. The tool will log in, navigate to the 'extracted' studies page,
+           and attempt to download associated PDFs.
+        """)
+        email_p2 = st.text_input("Covidence Email", key="pdf_email")
+        password_p2 = st.text_input("Covidence Password", type="password", key="pdf_password")
+        review_url_p2 = st.text_input("Review URL", value="https://app.covidence.org/reviews/your_review_id", key="pdf_review")
+        
+        if st.button("Run PDF Extraction Pipeline"):
+            if not email_p2 or not password_p2 or not review_url_p2:
+                st.error("Please fill in Covidence credentials and review URL.")
+                return
+            
+            st.info("Starting PDF extraction from Covidence...")
+            downloaded_pdfs, failed_papers = extract_and_download_pdfs_from_covidence(email_p2, password_p2, review_url_p2)
+            
+            if downloaded_pdfs:
+                zip_buffer = io.BytesIO()
+                with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+                    for filename, pdf_bytes in downloaded_pdfs.items():
+                        zip_file.writestr(filename, pdf_bytes)
+                zip_buffer.seek(0)
+                st.success("PDF extraction completed. Triggering automatic ZIP download...")
+                trigger_download(zip_buffer.getvalue(), "downloaded_pdfs.zip", "application/zip")
+            else:
+                st.warning("No PDFs were successfully downloaded.")
+            
+            if failed_papers:
+                csv_buffer = io.StringIO()
+                writer = csv.writer(csv_buffer)
+                writer.writerow(["Paper Title"])
+                for title in failed_papers:
+                    writer.writerow([title])
+                st.info("Triggering automatic CSV download for failed papers...")
+                trigger_download(csv_buffer.getvalue(), "failed_papers.csv", "text/csv")
 
 if __name__ == "__main__":
     main()
