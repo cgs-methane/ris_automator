@@ -8,36 +8,93 @@ import io
 import csv
 import zipfile
 import base64
+import tempfile
 import streamlit as st
 import streamlit.components.v1 as components
+from rapidfuzz import fuzz
+from scidownl import scihub_download
+
+# Selenium imports for Pipelines 1 & 2
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import Select
 from selenium.common.exceptions import NoSuchElementException, ElementClickInterceptedException
 from selenium.webdriver.common.action_chains import ActionChains
-
-# Use Firefox instead of Chrome
 from selenium.webdriver.firefox.options import Options as FirefoxOptions
 from selenium.webdriver.firefox.service import Service as FirefoxService
 from webdriver_manager.firefox import GeckoDriverManager
 
-# -------------------------------------------------------------------
-# Set Streamlit config for larger messages (e.g. for large downloads)
-# -------------------------------------------------------------------
-config_dir = os.path.join(os.getcwd(), ".streamlit")
-if not os.path.exists(config_dir):
-    os.makedirs(config_dir)
-config_file = os.path.join(config_dir, "config.toml")
-with open(config_file, "w") as f:
-    f.write("[server]\nmaxMessageSize = 600\n")
+# ───────────────────────── configuration for Pipeline 3 ─────────────────────────
+CROSSREF_API  = "https://api.crossref.org/works"
+SIM_THRESHOLD = 75                  # % similarity required when searching by title
+MAX_ROWS      = 20                  # Crossref rows to inspect when searching by title
 
-# -------------------------------------------------------------------
-# Utility: Find Firefox Binary (used by both pipelines)
-# -------------------------------------------------------------------
+# a handful of Sci-Hub mirrors—expand / reorder to taste
+SCI_HUB_MIRRORS = [
+    "https://sci-hub.se",
+    "https://sci-hub.st",
+    "https://sci-hub.ru",
+    "https://sci-hub.ee",
+    "https://sci-hub.ren",
+]
+
+# ──────────────────────── Crossref helpers ────────────────────────────
+@st.cache_data(show_spinner=False)
+def crossref_by_title(q: str, rows: int = MAX_ROWS):
+    r = requests.get(CROSSREF_API, params={"query": q, "rows": rows}, timeout=15)
+    r.raise_for_status()
+    return r.json()["message"]["items"]
+
+@st.cache_data(show_spinner=False)
+def crossref_by_doi(doi: str):
+    r = requests.get(f"{CROSSREF_API}/{requests.utils.quote(doi)}", timeout=15)
+    r.raise_for_status()
+    return r.json()["message"]
+
+def best_match(items, query: str):
+    best_item, best_score = None, 0
+    for it in items:
+        title = it.get("title", [""])[0]
+        score = fuzz.partial_ratio(query.lower(), title.lower())
+        if score > best_score:
+            best_item, best_score = it, score
+    return best_item, best_score
+
+# ─────────────────────── PDF-download helpers ─────────────────────────
+def try_publisher_pdf(item):
+    """Return PDF bytes if Crossref exposes a direct OA link."""
+    for link in item.get("link", []):
+        if link.get("content-type") == "application/pdf":
+            r = requests.get(link["URL"], timeout=20)
+            if r.ok and r.headers.get("content-type", "").startswith("application/pdf"):
+                return r.content
+    return None
+
+def fetch_via_scihub(doi: str, mirrors=SCI_HUB_MIRRORS):
+    last_exc = None
+    for mirror in mirrors:
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                out_fp = os.path.join(td, "paper.pdf")
+                scihub_download(doi, paper_type="doi", out=out_fp, scihub_url=mirror)
+                with open(out_fp, "rb") as f:
+                    return f.read()
+        except Exception as exc:
+            last_exc = exc
+    raise RuntimeError(f"All mirrors failed; last error: {last_exc}")
+
+def strip_doi(text: str) -> str:
+    """
+    Accept a raw DOI or an URL starting with https://doi.org/…
+    Return the plain DOI string.
+    """
+    text = text.strip()
+    if text.lower().startswith("http"):
+        return re.sub(r"https?://(dx\.)?doi\.org/", "", text, flags=re.I)
+    return text
+
+# ───────────────────────── configuration & helpers for Pipelines 1 & 2 ─────────────────────────
 def find_firefox_binary():
-    """
-    Check common names for Firefox or Firefox-ESR and return the binary path.
-    """
     possible_bins = ["firefox-esr", "firefox"]
     for bin_name in possible_bins:
         bin_path = shutil.which(bin_name)
@@ -45,12 +102,6 @@ def find_firefox_binary():
             return bin_path
     return None
 
-# -------------------------------------------------------------------
-# ===================== Pipeline 1: RIS Download & Upload =====================
-# -------------------------------------------------------------------
-#############################
-# Reconstruct abstract text from inverted index
-#############################
 def reconstruct_abstract(inverted_index):
     positions = []
     for word, indices in inverted_index.items():
@@ -64,9 +115,6 @@ def reconstruct_abstract(inverted_index):
             abstract_words[index] = word
     return " ".join(abstract_words)
 
-#############################
-# Create RIS entry from metadata
-#############################
 def create_ris_entry(title, authors, year, doi, abstract):
     ris_lines = []
     ris_lines.append("TY  - JOUR")
@@ -82,9 +130,6 @@ def create_ris_entry(title, authors, year, doi, abstract):
     ris_lines.append("ER  -")
     return "\n".join(ris_lines)
 
-#############################
-# Download RIS file for one article via OpenAlex
-#############################
 def download_ris_for_article(article_title, output_folder, file_index):
     search_url = "https://api.openalex.org/works"
     params = {"search": article_title}
@@ -101,7 +146,6 @@ def download_ris_for_article(article_title, output_folder, file_index):
         st.warning(f"No results found for '{article_title}'.")
         return None
     
-    # Take the first result
     first_result = data["results"][0]
     title = first_result.get("display_name", "No Title")
     doi = first_result.get("doi", None)
@@ -135,9 +179,6 @@ def download_ris_for_article(article_title, output_folder, file_index):
     else:
         return None
 
-#############################
-# Download all RIS files for provided article titles
-#############################
 def download_all_ris_files(article_titles, output_folder):
     if os.path.exists(output_folder):
         shutil.rmtree(output_folder)
@@ -150,9 +191,6 @@ def download_all_ris_files(article_titles, output_folder):
             downloaded_files.append(ris_file)
     return downloaded_files
 
-#############################
-# Upload RIS files to Covidence using Firefox (headless)
-#############################
 def upload_ris_files_to_covidence(ris_folder_path, covidence_email, covidence_password, review_url):
     firefox_path = find_firefox_binary()
     if not firefox_path:
@@ -160,13 +198,11 @@ def upload_ris_files_to_covidence(ris_folder_path, covidence_email, covidence_pa
         return
 
     firefox_options = FirefoxOptions()
-    firefox_options.add_argument("--headless")
+    # firefox_options.add_argument("--headless")
     firefox_options.add_argument("--no-sandbox")
     firefox_options.add_argument("--disable-dev-shm-usage")
     firefox_options.add_argument("--disable-gpu")
-    firefox_options.binary_location = firefox_path
-    # firefox_options.binary_location = "/Applications/Firefox.app/Contents/MacOS/firefox"
-
+    firefox_options.binary_location = "/Applications/Firefox.app/Contents/MacOS/firefox"
 
     try:
         service = FirefoxService(executable_path=GeckoDriverManager().install())
@@ -213,19 +249,10 @@ def upload_ris_files_to_covidence(ris_folder_path, covidence_email, covidence_pa
     finally:
         driver.quit()
 
-# -------------------------------------------------------------------
-# ===================== Pipeline 2: PDF Extraction =====================
-# -------------------------------------------------------------------
-#########################################
-# Helper: Sanitize Filename for PDFs
-#########################################
 def sanitize_filename(name):
     sanitized = re.sub(r'[^\w\-\.\ ]+', '', name)
     return sanitized.strip().replace(" ", "_")
 
-#########################################
-# Function: Trigger Automatic Download via JavaScript
-#########################################
 def trigger_download(data, filename, mime_type):
     if isinstance(data, bytes):
         b64 = base64.b64encode(data).decode()
@@ -244,9 +271,6 @@ def trigger_download(data, filename, mime_type):
     """
     components.html(html, height=0, width=0)
 
-#########################################
-# Download PDF from a study element in Covidence
-#########################################
 def download_pdf_from_study_element(driver, study_element, file_index):
     try:
         inner_load_more = study_element.find_element(By.XPATH, ".//button[contains(., 'Load more')]")
@@ -304,9 +328,6 @@ def download_pdf_from_study_element(driver, study_element, file_index):
     st.success(f"PDF for '{sanitized_title}' downloaded successfully.")
     return (sanitized_title, pdf_bytes)
 
-#########################################
-# Extract and download PDFs from Covidence
-#########################################
 def extract_and_download_pdfs_from_covidence(covidence_email, covidence_password, review_url):
     firefox_path = find_firefox_binary()
     if not firefox_path:
@@ -315,13 +336,11 @@ def extract_and_download_pdfs_from_covidence(covidence_email, covidence_password
     
     firefox_options = FirefoxOptions()
     # Uncomment below to run headless (if desired)
-    firefox_options.add_argument("--headless")
+    # firefox_options.add_argument("--headless")
     firefox_options.add_argument("--no-sandbox")
     firefox_options.add_argument("--disable-dev-shm-usage")
     firefox_options.add_argument("--disable-gpu")
-    firefox_options.binary_location = firefox_path
-    # firefox_options.binary_location = "/Applications/Firefox.app/Contents/MacOS/firefox"
-
+    firefox_options.binary_location = "/Applications/Firefox.app/Contents/MacOS/firefox"
 
     try:
         service = FirefoxService(executable_path=GeckoDriverManager().install())
@@ -367,7 +386,7 @@ def extract_and_download_pdfs_from_covidence(covidence_email, covidence_password
                 st.info("No more global 'Load more' button found.")
                 break
             except Exception as e:
-                st.warning(f"Error clicking global 'Load more': {e}")
+                st.warning(f" Error clicking global 'Load more': {e}")
                 time.sleep(3)
 
         study_elements = driver.find_elements(By.CSS_SELECTOR, "article[class*='StudyListItem']")
@@ -386,23 +405,97 @@ def extract_and_download_pdfs_from_covidence(covidence_email, covidence_password
         driver.quit()
     return downloaded_pdfs, failed_papers
 
-# -------------------------------------------------------------------
-# ===================== Streamlit Interface =====================
-# -------------------------------------------------------------------
+# ──────────────────────────────────────────────────────────────────────────────────────────
 def main():
+    st.set_page_config(page_title="Pipeline Tool", page_icon="📄")
     st.title("RIS & Covidence Pipeline Tool")
     st.markdown("""
-    This application provides two pipelines:
-    
-    **Pipeline 1:** Download RIS files from OpenAlex and upload them to Covidence.  
-    **Pipeline 2:** Extract PDFs from Covidence and automatically download a ZIP (with a CSV for failures, if any).
+    This application provides three pipelines:
+
+    **Pipeline 1:** One-Click PDF Downloader (Research Articles).  
+    **Pipeline 2:** Download RIS files from OpenAlex and upload them to Covidence.  
+    **Pipeline 3:** Extract PDFs from Covidence and download ZIP/CSV.
     """)
-    
-    tab1, tab2 = st.tabs(["Pipeline 1: RIS Files", "Pipeline 2: PDF Extraction"])
-    
-    # ------------------- Pipeline 1: RIS Files -------------------
+
+    tab1, tab2, tab3 = st.tabs([
+        "Pipeline 1: PDF Downloader",
+        "Pipeline 2: RIS Files",
+        "Pipeline 3: PDF Extraction"
+    ])
+
+    # ───────────────────────── Pipeline 1: PDF Downloader ─────────────────────────
     with tab1:
-        st.header("Pipeline 1: RIS Download and Covidence Upload")
+        st.title("📄 One-Click PDF Downloader (Research Articles)")
+        mode = st.radio("I have a …", ["Title / keywords", "DOI"], horizontal=True)
+
+        if mode == "Title / keywords":
+            title_query = st.text_input("Enter title or keywords", placeholder="e.g. Attention Is All You Need")
+            if st.button("Search & Download") and title_query.strip():
+                with st.spinner("Searching Crossref …"):
+                    items = crossref_by_title(title_query)
+                if not items:
+                    st.error("No Crossref results.")
+                else:
+                    itm, score = best_match(items, title_query)
+                    if score < SIM_THRESHOLD:
+                        st.warning(f"Best match similarity is {score}% (< {SIM_THRESHOLD}%). "
+                                   "Provide a more precise title.")
+                    else:
+                        title = itm["title"][0]
+                        doi   = itm["DOI"]
+                        st.info(f"Best match: *{title}*  \nDOI: `{doi}`  – similarity {score}%")
+
+                        with st.spinner("Fetching PDF …"):
+                            pdf = try_publisher_pdf(itm)
+                            if pdf is None:
+                                try:
+                                    pdf = fetch_via_scihub(doi)
+                                except Exception as e:
+                                    st.error(f"Crawling failed: {e}")
+                                    pdf = None
+
+                        if pdf:
+                            st.success("PDF ready!")
+                            st.download_button("📥 Save PDF",
+                                               pdf,
+                                               file_name=doi.replace("/", "_") + ".pdf",
+                                               mime="application/pdf")
+
+        else:  # DOI mode
+            doi_input = st.text_input("Enter DOI (plain text or full https://doi.org/… link)",
+                                      placeholder="e.g. 10.48550/arXiv.1706.03762")
+            if st.button("Download PDF") and doi_input.strip():
+                doi_plain = strip_doi(doi_input)
+                with st.spinner("Looking up DOI in Crossref …"):
+                    try:
+                        item = crossref_by_doi(doi_plain)
+                    except Exception as e:
+                        st.error(f"Crossref lookup failed: {e}")
+                        item = None
+
+                if item:
+                    title = item.get("title", [""])[0]
+                    st.info(f"Found article: *{title}*")
+
+                    with st.spinner("Fetching PDF …"):
+                        pdf = try_publisher_pdf(item)
+                        if pdf is None:
+                            try:
+                                pdf = fetch_via_scihub(doi_plain)
+                            except Exception as e:
+                                st.error(f"Searching failed: {e}")
+                                pdf = None
+
+                    if pdf:
+                        st.success("PDF ready!")
+                        st.download_button("📥 Save PDF",
+                                           pdf,
+                                           file_name=doi_plain.replace("/", "_") + ".pdf",
+                                           mime="application/pdf")
+
+    # ───────────────────────── Pipeline 2: RIS Files ─────────────────────────
+    with tab2:
+        st.header("Pipeline 2: RIS Download and Covidence Upload")
         st.markdown("""
         **Instructions:**
         1. Enter one article title per line.
@@ -433,10 +526,10 @@ def main():
                 upload_ris_files_to_covidence(RIS_FOLDER_PATH, covidence_email, covidence_password, review_url)
             else:
                 st.error("No RIS files were downloaded. Please check the article titles and try again.")
-    
-    # ------------------- Pipeline 2: PDF Extraction -------------------
-    with tab2:
-        st.header("Pipeline 2: PDF Extraction from Covidence")
+
+    # ───────────────────────── Pipeline 3: PDF Extraction ─────────────────────────
+    with tab3:
+        st.header("Pipeline 3: PDF Extraction from Covidence")
         st.markdown("""
         **Instructions:**
         1. Enter your Covidence credentials and review URL.
@@ -477,3 +570,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# dependencies: pip install streamlit requests rapidfuzz scidownl webdriver-manager selenium
