@@ -1,51 +1,74 @@
 #!/usr/bin/env python3
-# Merge_ris+cov.py  –  Streamlit “RIS & Covidence” helper
-# ------------------------------------------------------------------------------
-# Fix for Streamlit Cloud: redirect SciDownl’s SQLite file to a writable folder
-# BEFORE SciDownl (or anything that imports it) is loaded.
-# ------------------------------------------------------------------------------
+"""RIS & Covidence Pipeline Tool
+---------------------------------
+A Streamlit app that provides three independent pipelines:
 
-# ───────────────────────── PATCH MUST BE ABSOLUTE FIRST ─────────────────────────
-import os, tempfile, sqlalchemy                   # pylint: disable=wrong-import-position
+1. **PDF Downloader** – search Crossref by title/keywords or DOI and fetch the
+   article PDF directly (publisher link first, Sci-Hub fallback).
+2. **RIS Generator + Uploader** – query OpenAlex by title list, build RIS files
+   and upload them to a Covidence review.
+3. **PDF Extractor** – log into a Covidence review, crawl the *extracted* tab
+   and bulk-download the linked PDFs.
 
+The script includes an early monkey-patch so SciDownl can run on read-only
+hosts (e.g. Streamlit Cloud) – its internal SQLite database is redirected to
+``/tmp``.
+"""
+
+# ───────────────────── EARLY MONKEY-PATCH *MUST BE FIRST* ──────────────────────
+from pathlib import Path  # noqa: E402 – top-level import allowed: does not
+                          # touch scidownl yet, safe before the patch.
+
+import os
+import tempfile
+import importlib
+import functools
+from sqlalchemy import create_engine
+
+# Redirect SciDownl's default SQLite DB (which normally lives inside the
+# site-packages directory and is therefore read-only on many cloud hosts)
+# to a writable location in /tmp.
 _tmp_db = os.path.join(tempfile.gettempdir(), "scidownl.db")
-_real_create_engine = sqlalchemy.create_engine    # keep original ref
 
+def _tmp_engine(echo: bool = False, test: bool = False):
+    """Return a SQLAlchemy engine that points at our /tmp path."""
+    return create_engine(f"sqlite:///{_tmp_db}?check_same_thread=False", echo=echo)
 
-def _patched_create_engine(url, *args, **kwargs):  # noqa: D401 (simple function)
-    """
-    If SciDownl tries to create its default engine (SQLite file living inside
-    site-packages/scidownl/…), rewrite the URL so the DB lands in /tmp instead.
-    All other SQLAlchemy usages pass through untouched.
-    """
-    if isinstance(url, str) and url.startswith("sqlite:///") and "scidownl" in url:
-        url = f"sqlite:///{_tmp_db}?check_same_thread=False"
-    return _real_create_engine(url, *args, **kwargs)
+# Wrap importlib.import_module so that the very moment
+# ``scidownl.db.entities`` is first imported we can overwrite its
+# ``get_engine`` function *before* it calls ``create_tables()``.
+_orig_import = importlib.import_module
 
+@functools.wraps(_orig_import)
+def _patched_import(name, *args, **kwargs):
+    module = _orig_import(name, *args, **kwargs)
+    if name == "scidownl.db.entities":
+        # Swap the hard-coded get_engine with our patched version
+        module.get_engine = _tmp_engine
+    return module
 
-sqlalchemy.create_engine = _patched_create_engine
-# ────────────────────────────────────────────────────────────────────────────────
+importlib.import_module = _patched_import
+# ───────────────────────────────────────────────────────────────────────────────
 
+# SciDownl can now be imported safely (its DB will be created in /tmp)
+from scidownl import scihub_download  # noqa: E402
 
-# ------------------------------------------------------------------------------
-# ❶  Standard library imports that do NOT trigger SciDownl
-# ------------------------------------------------------------------------------
-from pathlib import Path
-import re, io, csv, time, zipfile, base64, shutil, tempfile, requests
+# ─────────────────────────── Standard library imports ──────────────────────────
+import re
+import io
+import csv
+import time
+import zipfile
+import base64
+import shutil
+import requests
 
-# ------------------------------------------------------------------------------
-# ❷  NOW it is safe to import SciDownl (and everything that depends on it)
-# ------------------------------------------------------------------------------
-from scidownl import scihub_download   # noqa: E402  (imported late on purpose)
-
-# ------------------------------------------------------------------------------
-# ❸  Third-party and Streamlit imports
-# ------------------------------------------------------------------------------
+# ────────────────────────────── Third-party libs ───────────────────────────────
 import streamlit as st
 import streamlit.components.v1 as components
 from rapidfuzz import fuzz
 
-# Selenium
+# Selenium stack
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import Select
@@ -54,20 +77,21 @@ from selenium.webdriver.firefox.options import Options as FirefoxOptions
 from selenium.webdriver.firefox.service import Service as FirefoxService
 from webdriver_manager.firefox import GeckoDriverManager
 
-# ------------------------------------------------------------------------------
-# ❹  Constants
-# ------------------------------------------------------------------------------
-CROSSREF_API  = "https://api.crossref.org/works"
+# ─────────────────────────────── Configuration ────────────────────────────────
+CROSSREF_API = "https://api.crossref.org/works"
 SIM_THRESHOLD = 75
-MAX_ROWS      = 20
+MAX_ROWS = 20
+
 SCI_HUB_MIRRORS = [
-    "https://sci-hub.se", "https://sci-hub.st", "https://sci-hub.ru",
-    "https://sci-hub.ee", "https://sci-hub.ren"
+    "https://sci-hub.se",
+    "https://sci-hub.st",
+    "https://sci-hub.ru",
+    "https://sci-hub.ee",
+    "https://sci-hub.ren",
 ]
 
-# ------------------------------------------------------------------------------
-# ❺  Cross-ref helpers
-# ------------------------------------------------------------------------------
+# ──────────────────────────── Helper functions ────────────────────────────────
+# Cross-ref helpers
 @st.cache_data(show_spinner=False)
 def crossref_by_title(q: str, rows: int = MAX_ROWS):
     r = requests.get(CROSSREF_API, params={"query": q, "rows": rows}, timeout=15)
@@ -92,9 +116,8 @@ def best_match(items, query: str):
     return best_item, best_score
 
 
-# ------------------------------------------------------------------------------
-# ❻  PDF helpers
-# ------------------------------------------------------------------------------
+# PDF helpers
+
 def try_publisher_pdf(item):
     for link in item.get("link", []):
         if link.get("content-type") == "application/pdf":
@@ -112,7 +135,7 @@ def fetch_via_scihub(doi: str, mirrors=SCI_HUB_MIRRORS):
                 out_fp = Path(td) / "paper.pdf"
                 scihub_download(doi, paper_type="doi", out=str(out_fp), scihub_url=mirror)
                 return out_fp.read_bytes()
-        except Exception as exc:             # noqa: BLE001  (broad but OK here)
+        except Exception as exc:  # noqa: BLE001 (broad OK here)
             last_exc = exc
     raise RuntimeError(f"All mirrors failed; last error: {last_exc}")
 
@@ -124,66 +147,70 @@ def strip_doi(text: str) -> str:
     return text
 
 
-# ------------------------------------------------------------------------------
-# ❼  Helpers for Pipelines 1 & 2
-# ------------------------------------------------------------------------------
+# Misc helpers
+
 def find_firefox_binary():
-    for bn in ("firefox-esr", "firefox"):
-        p = shutil.which(bn)
+    for candidate in ("firefox-esr", "firefox"):
+        p = shutil.which(candidate)
         if p:
             return p
     return None
 
 
 def reconstruct_abstract(inv_idx):
-    words = [""] * (max(m for idxs in inv_idx.values() for m in idxs) + 1) if inv_idx else []
-    for w, idxs in inv_idx.items():
+    positions = [pos for idxs in inv_idx.values() for pos in idxs] if inv_idx else []
+    if not positions:
+        return ""
+    words = [""] * (max(positions) + 1)
+    for word, idxs in inv_idx.items():
         for i in idxs:
-            words[i] = w
-    return " ".join(words).strip()
+            words[i] = word
+    return " ".join(words)
 
 
 def create_ris_entry(title, authors, year, doi, abstract):
     lines = ["TY  - JOUR", f"TI  - {title}"]
-    lines += [f"AU  - {a}" for a in authors]
-    if year:     lines.append(f"PY  - {year}")
-    if doi:      lines.append(f"DO  - {doi}")
-    if abstract: lines.append(f"AB  - {abstract}")
+    lines += [f"AU  - {au}" for au in authors]
+    if year:
+        lines.append(f"PY  - {year}")
+    if doi:
+        lines.append(f"DO  - {doi}")
+    if abstract:
+        lines.append(f"AB  - {abstract}")
     lines.append("ER  -")
     return "\n".join(lines)
 
 
-def download_ris_for_article(article_title, output_folder, file_index):
-    OA_API = "https://api.openalex.org/works"
+def download_ris_for_article(title, out_dir, idx):
+    OA = "https://api.openalex.org/works"
     try:
-        resp = requests.get(OA_API, params={"search": article_title}, timeout=15)
-        resp.raise_for_status()
+        rsp = requests.get(OA, params={"search": title}, timeout=15)
+        rsp.raise_for_status()
     except requests.RequestException as e:
-        st.error(f"OpenAlex search error for '{article_title}': {e}")
+        st.error(f"OpenAlex search error for '{title}': {e}")
         return None
 
-    results = resp.json().get("results", [])
+    results = rsp.json().get("results", [])
     if not results:
-        st.warning(f"No results for '{article_title}'.")
+        st.warning(f"No results for '{title}'.")
         return None
 
-    r0      = results[0]
-    title   = r0.get("display_name", "No Title")
-    doi     = r0.get("doi")
-    year    = r0.get("publication_year", "")
-    authors = [au["author"]["display_name"] for au in r0.get("authorships", [])]
-
+    r0 = results[0]
+    _title = r0.get("display_name", "No Title")
+    doi  = r0.get("doi")
+    year = r0.get("publication_year", "")
+    authors = [a["author"]["display_name"] for a in r0.get("authorships", [])]
     abstract = reconstruct_abstract(r0.get("abstract_inverted_index", {}))
-    st.info(f"Found article: {title} ({year})")
 
-    ris_path = Path(output_folder) / f"{file_index}.ris"
+    st.info(f"Found: {_title} ({year})")
+    ris_text = create_ris_entry(_title, authors, year, doi, abstract)
+    path = Path(out_dir) / f"{idx}.ris"
     try:
-        ris_path.write_text(create_ris_entry(title, authors, year, doi, abstract), encoding="utf-8")
-        st.success(f"Saved {ris_path.name}")
-    except Exception as e:                  # noqa: BLE001
-        st.error(f"Writing RIS failed for '{article_title}': {e}")
+        path.write_text(ris_text, encoding="utf-8")
+    except Exception as e:  # noqa: BLE001
+        st.error(f"Write error for '{_title}': {e}")
         return None
-    return str(ris_path) if ris_path.stat().st_size else None
+    return str(path) if path.stat().st_size else None
 
 
 def download_all_ris_files(titles, out_dir):
@@ -193,13 +220,10 @@ def download_all_ris_files(titles, out_dir):
     return [f for f in files if f]
 
 
-# ------------------------------------------------------------------------------
-# ❽  Covidence automation (upload / extract)
-# ------------------------------------------------------------------------------
-def upload_ris_files_to_covidence(ris_folder, email, password, review_url):
+def upload_ris_files_to_covidence(ris_dir, email, password, review_url):
     fx_bin = find_firefox_binary()
     if not fx_bin:
-        st.error("Firefox binary not found. Install firefox-esr.")
+        st.error("Firefox binary not found – install firefox-esr.")
         return
 
     opts = FirefoxOptions()
@@ -209,57 +233,188 @@ def upload_ris_files_to_covidence(ris_folder, email, password, review_url):
     opts.binary_location = fx_bin
 
     try:
-        driver = webdriver.Firefox(
-            service=FirefoxService(executable_path=GeckoDriverManager().install()),
-            options=opts,
-        )
-    except Exception as e:                                      # noqa: BLE001
-        st.error(f"WebDriver init error: {e}")
+        drv = webdriver.Firefox(service=FirefoxService(GeckoDriverManager().install()),
+                                options=opts)
+    except Exception as e:  # noqa: BLE001
+        st.error(f"WebDriver init failed: {e}")
         return
 
     try:
-        driver.get("https://app.covidence.org/sign_in")
-        driver.maximize_window()
+        drv.get("https://app.covidence.org/sign_in")
+        drv.maximize_window()
         time.sleep(3)
-        driver.find_element(By.ID, 'session_email').send_keys(email)
-        driver.find_element(By.NAME, 'session[password]').send_keys(password)
-        driver.find_element(By.XPATH, '//form[@action="/session"]//input[@type="submit"]').click()
+        drv.find_element(By.ID, "session_email").send_keys(email)
+        drv.find_element(By.NAME, "session[password]").send_keys(password)
+        drv.find_element(By.XPATH, '//form[@action="/session"]//input[@type="submit"]').click()
         time.sleep(5)
 
-        for ris in sorted(Path(ris_folder).glob("*.ris")):
+        for ris in sorted(Path(ris_dir).glob("*.ris")):
             st.write(f"Uploading {ris.name} …")
-            driver.get(f"{review_url}/citation_imports/new")
+            drv.get(f"{review_url}/citation_imports/new")
             time.sleep(2)
-            Select(driver.find_element(By.NAME, 'citation_import[study_category]')).select_by_visible_text('Screen')
-            driver.find_element(By.ID, 'citation_import_file').send_keys(str(ris))
-            driver.find_element(By.ID, 'upload-citations').click()
+            Select(drv.find_element(By.NAME, "citation_import[study_category]"))\
+                .select_by_visible_text("Screen")
+            drv.find_element(By.ID, "citation_import_file").send_keys(str(ris))
+            drv.find_element(By.ID, "upload-citations").click()
             time.sleep(5)
     finally:
-        driver.quit()
-    st.success("All RIS files processed.")
+        drv.quit()
+    st.success("RIS upload complete.")
 
 
-# (The rest of the Selenium PDF-extraction functions remain unchanged – omitted
-# here for brevity but copy from your current version.)
-# ------------------------------------------------------------------------------
+# --- Helper utilities for PDF extraction pipeline -----------------------------
 
-# ------------------------------------------------------------------------------
-# ❾  Streamlit UI
-# ------------------------------------------------------------------------------
+def sanitize_filename(name):
+    sanitized = re.sub(r"[^\w\-\.\ ]+", "", name)
+    return sanitized.strip().replace(" ", "_")
+
+
+def trigger_download(data, filename, mime):
+    b64 = base64.b64encode(data if isinstance(data, bytes) else data.encode()).decode()
+    href = f"data:{mime};base64,{b64}"
+    components.html(
+        f"""
+        <html><body>
+            <a id='dl' href='{href}' download='{filename}'></a>
+            <script>document.getElementById('dl').click();</script>
+        </body></html>
+        """,
+        height=0,
+        width=0,
+    )
+
+
+# (Functions download_pdf_from_study_element and extract_and_download_pdfs_from_covidence
+# are unchanged from the user's original code – copied verbatim below.)
+
+def download_pdf_from_study_element(driver, study_element, file_index):
+    try:
+        inner_load = study_element.find_element(By.XPATH, ".//button[contains(., 'Load more')]")
+        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", inner_load)
+        time.sleep(1)
+        inner_load.click()
+        st.write("Clicked inner 'Load more'.")
+        time.sleep(2)
+    except NoSuchElementException:
+        pass
+
+    try:
+        view_btn = study_element.find_element(By.CSS_SELECTOR, "button.css-wetlpj")
+        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", view_btn)
+        time.sleep(1)
+        driver.execute_script("arguments[0].click();", view_btn)
+        st.write("Clicked 'View full text'.")
+        time.sleep(2)
+    except Exception as e:  # noqa: BLE001
+        st.error(f"View button error: {e}")
+        return sanitize_filename(f"document_{file_index}"), None
+
+    try:
+        title = study_element.find_element(By.CSS_SELECTOR,
+                                           "h2.webpack-concepts-Extraction-StudyList-StudyReference-module__title").text.strip()
+    except Exception:  # noqa: BLE001
+        title = f"document_{file_index}"
+    title = title or f"document_{file_index}"
+
+    try:
+        pdf_link = study_element.find_element(By.CSS_SELECTOR,
+                            "li.webpack-concepts-Extraction-StudyList-Documents-module__documentContainer a").get_attribute("href")
+    except Exception as e:  # noqa: BLE001
+        st.error(f"PDF link not found: {e}")
+        return sanitize_filename(title), None
+
+    try:
+        pdf_bytes = requests.get(pdf_link, timeout=20).content
+    except Exception as e:  # noqa: BLE001
+        st.error(f"PDF download error: {e}")
+        return sanitize_filename(title), None
+
+    st.success(f"Downloaded '{title}'.")
+    return sanitize_filename(title), pdf_bytes
+
+
+def extract_and_download_pdfs_from_covidence(email, password, review_url):
+    fx_bin = find_firefox_binary()
+    if not fx_bin:
+        st.error("Firefox binary not found – install firefox-esr.")
+        return {}, []
+
+    opts = FirefoxOptions()
+    # opts.add_argument("--headless")  # optional
+    opts.add_argument("--no-sandbox")
+    opts.add_argument("--disable-dev-shm-usage")
+    opts.add_argument("--disable-gpu")
+    opts.binary_location = fx_bin
+
+    try:
+        drv = webdriver.Firefox(service=FirefoxService(GeckoDriverManager().install()),
+                                options=opts)
+    except Exception as e:  # noqa: BLE001
+        st.error(f"WebDriver init failed: {e}")
+        return {}, []
+
+    downloaded, failed = {}, []
+    try:
+        drv.get("https://app.covidence.org/sign_in")
+        drv.maximize_window()
+        time.sleep(3)
+        drv.find_element(By.ID, "session_email").send_keys(email)
+        drv.find_element(By.NAME, "session[password]").send_keys(password)
+        drv.find_element(By.XPATH, '//form[@action="/session"]//input[@type="submit"]').click()
+        time.sleep(5)
+        drv.get(review_url)
+        time.sleep(3)
+        try:
+            drv.find_element(By.PARTIAL_LINK_TEXT, "extracted").click()
+            st.info("Opened 'extracted' studies.")
+        except Exception as e:  # noqa: BLE001
+            st.error(f"Extracted link error: {e}")
+            return downloaded, failed
+        time.sleep(3)
+
+        while True:
+            try:
+                load_more = drv.find_element(By.XPATH, "//button[contains(., 'Load more')]")
+                drv.execute_script("arguments[0].scrollIntoView({block: 'center'});", load_more)
+                time.sleep(1)
+                load_more.click()
+                st.write("Clicked global 'Load more'.")
+                time.sleep(3)
+            except NoSuchElementException:
+                break
+
+        studies = drv.find_elements(By.CSS_SELECTOR, "article[class*='StudyListItem']")
+        for i, study in enumerate(studies, 1):
+            st.write(f"Processing study {i} …")
+            fname, pdf = download_pdf_from_study_element(drv, study, i)
+            if pdf:
+                downloaded[f"{fname}.pdf"] = pdf
+            else:
+                failed.append(f"{fname}.pdf")
+    finally:
+        drv.quit()
+    return downloaded, failed
+
+# ────────────────────────────── Streamlit UI ────────────────────────────────
+
 def main():
     st.set_page_config(page_title="Pipeline Tool", page_icon="📄")
-    st.title("RIS & Covidence Pipeline Tool")
+    st.header("CGS- Paper, RIS & Covidence Pipeline Tool")
+    st.markdown(
+        """
+        **Pipelines**
+        1. *PDF Downloader*  
+        2. *RIS ↓ / Covidence ↑*  
+        3. *PDF Extractor*
+        """
+    )
 
-    tab1, tab2, tab3 = st.tabs([
-        "Pipeline 1 – PDF Downloader",
-        "Pipeline 2 – RIS Files",
-        "Pipeline 3 – PDF Extraction"
-    ])
+    p1, p2, p3 = st.tabs(["PDF Downloader", "RIS Files", "PDF Extraction"])
 
-    # ------------------------- Pipeline 1 -------------------------
-    with tab1:
-        st.header("One-Click PDF Downloader")
-        mode = st.radio("I have a …", ["Title / keywords", "DOI"], horizontal=True)
+    # ---------------- Pipeline 1 ----------------
+    with p1:
+        st.header("PDF Downloader for any Article using AI Agent")
+        mode = st.radio("Search by", ["Title / keywords", "DOI"], horizontal=True)
 
         if mode == "Title / keywords":
             query = st.text_input("Enter title or keywords")
@@ -267,31 +422,28 @@ def main():
                 with st.spinner("Searching Crossref …"):
                     items = crossref_by_title(query)
                 if not items:
-                    st.error("No Crossref results.")
+                    st.error("No results.")
                     return
                 itm, score = best_match(items, query)
                 if score < SIM_THRESHOLD:
-                    st.warning(f"Best match {score}% < threshold {SIM_THRESHOLD}%.")
+                    st.warning(f"Best match only {score}%. Provide a more precise title.")
                     return
-
                 title, doi = itm["title"][0], itm["DOI"]
-                st.info(f"*{title}*  \nDOI: `{doi}`  · similarity {score}%")
-
+                st.info(f"*{title}*  \nDOI: `{doi}`  · {score}% similarity")
                 with st.spinner("Fetching PDF …"):
                     pdf = try_publisher_pdf(itm) or fetch_via_scihub(doi)
                 if pdf:
                     st.success("PDF ready!")
-                    st.download_button("📥 Save PDF", pdf,
-                                       file_name=doi.replace("/", "_") + ".pdf",
-                                       mime="application/pdf")
+                    st.download_button("📥 Save", pdf, file_name=doi.replace("/", "_") + ".pdf", mime="application/pdf")
+
         else:
             doi_in = st.text_input("Enter DOI or https://doi.org/…")
             if st.button("Download PDF") and doi_in.strip():
                 doi = strip_doi(doi_in)
                 try:
                     itm = crossref_by_doi(doi)
-                except Exception as e:                      # noqa: BLE001
-                    st.error(f"Crossref lookup failed: {e}")
+                except Exception as e:  # noqa: BLE001
+                    st.error(f"Crossref error: {e}")
                     return
                 title = itm.get("title", [""])[0]
                 st.info(f"*{title}*")
@@ -299,37 +451,59 @@ def main():
                     pdf = try_publisher_pdf(itm) or fetch_via_scihub(doi)
                 if pdf:
                     st.success("PDF ready!")
-                    st.download_button("📥 Save PDF", pdf,
-                                       file_name=doi.replace("/", "_") + ".pdf",
-                                       mime="application/pdf")
+                    st.download_button("📥 Save", pdf, file_name=doi.replace("/", "_") + ".pdf", mime="application/pdf")
 
-    # ------------------------- Pipeline 2 -------------------------
-    with tab2:
-        st.header("RIS ↓ / Covidence ↑")
+    # ---------------- Pipeline 2 ----------------
+    with p2:
+        st.header("RIS Generator ➜ Covidence Uploader")
         titles_txt = st.text_area("Article titles (one per line)")
-        email = st.text_input("Covidence email")
-        pwd   = st.text_input("Covidence password", type="password")
-        rvurl = st.text_input("Review URL", value="https://app.covidence.org/reviews/…")
-
+        email  = st.text_input("Covidence email")
+        pwd    = st.text_input("Covidence password", type="password")
+        rv_url = st.text_input("Review URL", value="https://app.covidence.org/reviews/…")
         if st.button("Run RIS Pipeline"):
             titles = [t.strip() for t in titles_txt.splitlines() if t.strip()]
-            if not (titles and email and pwd and rvurl):
+            if not (titles and email and pwd and rv_url):
                 st.error("Please fill all fields.")
                 return
-            RIS_DIR = Path.cwd() / "RIS_files"
-            st.subheader("Step 1 – Downloading RIS")
-            files = download_all_ris_files(titles, RIS_DIR)
+            ris_dir = Path.cwd() / "RIS_files"
+            st.subheader("Step 1 — Download RIS")
+            files = download_all_ris_files(titles, ris_dir)
             if not files:
-                st.error("No RIS files created.")
+                st.error("No RIS files were created.")
                 return
-            st.subheader("Step 2 – Uploading to Covidence")
-            upload_ris_files_to_covidence(RIS_DIR, email, pwd, rvurl)
+            st.subheader("Step 2 — Upload to Covidence")
+            upload_ris_files_to_covidence(ris_dir, email, pwd, rv_url)
 
-    # ------------------------- Pipeline 3 -------------------------
-    with tab3:
+    # ---------------- Pipeline 3 ----------------
+    with p3:
         st.header("PDF Extraction from Covidence")
-        st.info("PDF-extraction functions unchanged — copy from your previous version.")
+        email  = st.text_input("Covidence email", key="p3_email")
+        pwd    = st.text_input("Covidence password", type="password", key="p3_pwd")
+        rv_url = st.text_input("Review URL", value="https://app.covidence.org/reviews/…", key="p3_url")
+        if st.button("Run PDF Extraction"):
+            if not (email and pwd and rv_url):
+                st.error("Please fill all fields.")
+                return
+            with st.spinner("Extracting PDFs …"):
+                pdfs, fails = extract_and_download_pdfs_from_covidence(email, pwd, rv_url)
+            if pdfs:
+                buf = io.BytesIO()
+                with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+                    for fn, data in pdfs.items():
+                        zf.writestr(fn, data)
+                buf.seek(0)
+                trigger_download(buf.getvalue(), "downloaded_pdfs.zip", "application/zip")
+            if fails:
+                st.warning(f"{len(fails)} papers failed. CSV will download …")
+                csv_buf = io.StringIO()
+                csv.writer(csv_buf).writerow(["Paper Title"])
+                csv.writer(csv_buf).writerows([[f] for f in fails])
+                trigger_download(csv_buf.getvalue(), "failed_papers.csv", "text/csv")
 
-# ------------------------------------------------------------------------------
+
 if __name__ == "__main__":
     main()
+
+# -------------------------- Installation hint --------------------------
+# pip install streamlit requests rapidfuzz scidownl sqlalchemy selenium
+#             webdriver-manager
