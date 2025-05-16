@@ -1,29 +1,14 @@
 import os
-import configparser
 
-# ─────── Prep SciDownl’s default places ───────
-HOME       = os.path.expanduser("~")
-CACHE_DIR  = os.path.join(HOME, ".cache", "scidownl")
-CONFIG_DIR = os.path.join(HOME, ".config", "scidownl")
-CONFIG_FN  = os.path.join(CONFIG_DIR, "global.ini")
-DB_PATH    = os.path.join(CACHE_DIR, "scihub.db")
+# ─────── Force XDG dirs under your project ───────
+# pick a folder inside your workspace
+project_root = os.getcwd()
+os.environ.setdefault("XDG_CACHE_HOME",  os.path.join(project_root, ".cache"))
+os.environ.setdefault("XDG_CONFIG_HOME", os.path.join(project_root, ".config"))
 
-# 1. Make sure the cache + config dirs exist
-os.makedirs(CACHE_DIR, exist_ok=True)
-os.makedirs(CONFIG_DIR, exist_ok=True)
-
-# 2. Create or update global.ini so it points at our DB_PATH
-cfg = configparser.ConfigParser()
-if os.path.exists(CONFIG_FN):
-    cfg.read(CONFIG_FN)
-if not cfg.has_section("db"):
-    cfg.add_section("db")
-cfg.set("db", "file", DB_PATH)
-with open(CONFIG_FN, "w") as cf:
-    cfg.write(cf)
-
-# 3. Touch the sqlite file so SQLite can open it immediately
-open(DB_PATH, "a").close()
+# create them now so SQLite can write
+os.makedirs(os.environ["XDG_CACHE_HOME"],  exist_ok=True)
+os.makedirs(os.environ["XDG_CONFIG_HOME"], exist_ok=True)
 
 # ─────── Now it’s safe to import SciDownl ───────
 from scidownl import scihub_download
