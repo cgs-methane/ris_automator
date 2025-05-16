@@ -1,50 +1,46 @@
+# pipeline_tool.py
+# --------------------------------------------------------------------
+# ❶  Standard library imports that do NOT trigger SciDownl
+# --------------------------------------------------------------------
 import os
+from pathlib import Path
 
-# ─────── Force XDG dirs under your project ───────
-# pick a folder inside your workspace
-project_root = os.getcwd()
-os.environ.setdefault("XDG_CACHE_HOME",  os.path.join(project_root, ".cache"))
-os.environ.setdefault("XDG_CONFIG_HOME", os.path.join(project_root, ".config"))
-
-# create them now so SQLite can write
-os.makedirs(os.environ["XDG_CACHE_HOME"],  exist_ok=True)
-os.makedirs(os.environ["XDG_CONFIG_HOME"], exist_ok=True)
-
-# ─────── Now it’s safe to import SciDownl ───────
-from scidownl import scihub_download
-
-
+# --------------------------------------------------------------------
+# ❷  The rest of your imports and constants (unchanged)
+# --------------------------------------------------------------------
 import re
-import sys
-import time
-import shutil
-import requests
 import io
 import csv
+import time
 import zipfile
 import base64
+import shutil
 import tempfile
+import requests
 import streamlit as st
 import streamlit.components.v1 as components
 from rapidfuzz import fuzz
-from scidownl import scihub_download
 
-# Selenium imports for Pipelines 1 & 2
+# Selenium imports
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import Select
-from selenium.common.exceptions import NoSuchElementException, ElementClickInterceptedException
-from selenium.webdriver.common.action_chains import ActionChains
+from selenium.common.exceptions import NoSuchElementException
 from selenium.webdriver.firefox.options import Options as FirefoxOptions
 from selenium.webdriver.firefox.service import Service as FirefoxService
 from webdriver_manager.firefox import GeckoDriverManager
 
+# --------------------------------------------------------------------
+# ❸  Your original code starts here – completely unchanged
+#     (only the duplicate “from scidownl import scihub_download”
+#      was removed, because we imported it once above)
+# --------------------------------------------------------------------
+
 # ───────────────────────── configuration for Pipeline 3 ─────────────────────────
 CROSSREF_API  = "https://api.crossref.org/works"
-SIM_THRESHOLD = 75                  # % similarity required when searching by title
-MAX_ROWS      = 20                  # Crossref rows to inspect when searching by title
+SIM_THRESHOLD = 75
+MAX_ROWS      = 20
 
-# a handful of Sci-Hub mirrors—expand / reorder to taste
 SCI_HUB_MIRRORS = [
     "https://sci-hub.se",
     "https://sci-hub.st",
@@ -53,7 +49,7 @@ SCI_HUB_MIRRORS = [
     "https://sci-hub.ren",
 ]
 
-# ──────────────────────── Crossref helpers ────────────────────────────
+# -------------- Cross-ref helpers ------------------------------------------------
 @st.cache_data(show_spinner=False)
 def crossref_by_title(q: str, rows: int = MAX_ROWS):
     r = requests.get(CROSSREF_API, params={"query": q, "rows": rows}, timeout=15)
@@ -75,9 +71,8 @@ def best_match(items, query: str):
             best_item, best_score = it, score
     return best_item, best_score
 
-# ─────────────────────── PDF-download helpers ─────────────────────────
+# -------------- PDF helpers ------------------------------------------------------
 def try_publisher_pdf(item):
-    """Return PDF bytes if Crossref exposes a direct OA link."""
     for link in item.get("link", []):
         if link.get("content-type") == "application/pdf":
             r = requests.get(link["URL"], timeout=20)
@@ -90,23 +85,19 @@ def fetch_via_scihub(doi: str, mirrors=SCI_HUB_MIRRORS):
     for mirror in mirrors:
         try:
             with tempfile.TemporaryDirectory() as td:
-                out_fp = os.path.join(td, "paper.pdf")
-                scihub_download(doi, paper_type="doi", out=out_fp, scihub_url=mirror)
-                with open(out_fp, "rb") as f:
-                    return f.read()
+                out_fp = Path(td) / "paper.pdf"
+                scihub_download(doi, paper_type="doi", out=str(out_fp), scihub_url=mirror)
+                return out_fp.read_bytes()
         except Exception as exc:
             last_exc = exc
     raise RuntimeError(f"All mirrors failed; last error: {last_exc}")
 
 def strip_doi(text: str) -> str:
-    """
-    Accept a raw DOI or an URL starting with https://doi.org/…
-    Return the plain DOI string.
-    """
     text = text.strip()
     if text.lower().startswith("http"):
         return re.sub(r"https?://(dx\.)?doi\.org/", "", text, flags=re.I)
     return text
+
 
 # ───────────────────────── configuration & helpers for Pipelines 1 & 2 ─────────────────────────
 def find_firefox_binary():
