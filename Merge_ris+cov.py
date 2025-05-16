@@ -1,14 +1,24 @@
-# pipeline_tool.py
-# --------------------------------------------------------------------
-# ❶  Standard library imports that do NOT trigger SciDownl
-# --------------------------------------------------------------------
-import os
+
 from pathlib import Path
 
 # ───────────────────── 2 ──────────────────────────────
 # NOW it is safe to import SciDownl (and everything that depends on it)
-from scidownl import scihub_download          # noqa: E402  (imported late on purpose)
+import os, tempfile, importlib, sqlalchemy
 
+# 1. Choose any writable place (here the container's temp directory)
+_tmp_db = os.path.join(tempfile.gettempdir(), "scidownl.db")
+
+def _tmp_engine(echo: bool = False, test: bool = False):
+    """Replacement for scidownl.db.entities.get_engine"""
+    return sqlalchemy.create_engine(
+        f"sqlite:///{_tmp_db}?check_same_thread=False", echo=echo
+    )
+
+# 2. Load the module and monkey-patch the function
+entities = importlib.import_module("scidownl.db.entities")
+entities.get_engine = _tmp_engine
+# ─── now it's safe to pull in SciDownl ───
+from scidownl import scihub_download
 # --------------------------------------------------------------------
 # ❷  The rest of your imports and constants (unchanged)
 # --------------------------------------------------------------------
