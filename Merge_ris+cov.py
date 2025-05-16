@@ -1,4 +1,9 @@
 import os
+
+# ──────────────────── Fix SciDownl “unable to open database file” ────────────────────
+cache_dir = os.path.expanduser("~/.cache/scidownl")
+os.makedirs(cache_dir, exist_ok=True)
+import os
 import re
 import sys
 import time
