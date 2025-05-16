@@ -1,19 +1,34 @@
 import os
+import configparser
 
-# ─────── Create a writeable cache path ───────
-# Here we choose a folder inside your project, but you can
-# point this anywhere your Streamlit process can write.
-CACHE_DIR = os.path.join(os.getcwd(), "scidownl_cache")
+# ─────── Prep SciDownl’s default places ───────
+HOME       = os.path.expanduser("~")
+CACHE_DIR  = os.path.join(HOME, ".cache", "scidownl")
+CONFIG_DIR = os.path.join(HOME, ".config", "scidownl")
+CONFIG_FN  = os.path.join(CONFIG_DIR, "global.ini")
+DB_PATH    = os.path.join(CACHE_DIR, "scihub.db")
+
+# 1. Make sure the cache + config dirs exist
 os.makedirs(CACHE_DIR, exist_ok=True)
+os.makedirs(CONFIG_DIR, exist_ok=True)
 
-# ─────── Override SciDownl’s DB location ───────
-# Must do this *before* importing any of the core task code,
-# which tries to call create_tables() at import time.
-import scidownl.config as _sd_config
-_sd_config.config["db"]["file"] = os.path.join(CACHE_DIR, "scihub.db")
+# 2. Create or update global.ini so it points at our DB_PATH
+cfg = configparser.ConfigParser()
+if os.path.exists(CONFIG_FN):
+    cfg.read(CONFIG_FN)
+if not cfg.has_section("db"):
+    cfg.add_section("db")
+cfg.set("db", "file", DB_PATH)
+with open(CONFIG_FN, "w") as cf:
+    cfg.write(cf)
 
-# ─────── Now import the downloader safely ───────
-from scidownl.api.scihub import scihub_download
+# 3. Touch the sqlite file so SQLite can open it immediately
+open(DB_PATH, "a").close()
+
+# ─────── Now it’s safe to import SciDownl ───────
+from scidownl import scihub_download
+
+
 import re
 import sys
 import time
