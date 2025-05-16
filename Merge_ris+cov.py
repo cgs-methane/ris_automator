@@ -83,17 +83,27 @@ def try_publisher_pdf(item):
 
 
 def fetch_via_scihub(doi: str, mirrors=SCI_HUB_MIRRORS):
+    """Return PDF bytes or None.  Never raises."""
     last_exc = None
     for mirror in mirrors:
         try:
             with tempfile.TemporaryDirectory() as td:
                 out_fp = Path(td) / "paper.pdf"
-                scihub_download(doi, paper_type="doi", out=str(out_fp), scihub_url=mirror)
+                scihub_download(
+                    doi,
+                    paper_type="doi",
+                    out=str(out_fp),
+                    scihub_url=mirror,
+                )
                 return out_fp.read_bytes()
-        except Exception as exc:                               # noqa:  BLE001
+        except Exception as exc:             # noqa: BLE001
             last_exc = exc
-    raise RuntimeError(f"All mirrors failed – {last_exc}")
 
+    # All mirrors failed → just warn and return None
+    st.warning("Sci-Hub mirrors unreachable for that DOI.")
+    # Optional: also log details to console for debugging
+    print("Sci-Hub crawl failed:", last_exc, flush=True)
+    return None
 
 def strip_doi(text: str) -> str:
     text = text.strip()
@@ -414,7 +424,7 @@ def extract_and_download_pdfs_from_covidence(covidence_email, covidence_password
     return downloaded_pdfs, failed_papers
 def main():
     st.set_page_config(page_title="Pipeline Tool", page_icon="📄")
-    st.title("RIS & Covidence Pipeline Tool")
+    st.header("CGS Tools: PDF, RIS & Covidence Pipeline")
 
     tab1, tab2, tab3 = st.tabs([
         "Pipeline 1 – PDF Downloader",
@@ -424,7 +434,7 @@ def main():
 
     # ─────────────────────────  Pipeline 1  ─────────────────────────
     with tab1:
-        st.header("One-Click PDF Downloader (Research Articles)")
+        st.header("(Research Articles) Downloader uisng AI Agents")
         mode = st.radio("I have a …", ["Title / keywords", "DOI"], horizontal=True)
 
         # ----- Search by title / keywords -----
