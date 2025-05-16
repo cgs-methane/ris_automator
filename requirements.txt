@@ -2,4 +2,4 @@ selenium
 webdriver-manager
 requests
 rapidfuzz
-scidownl @ git+https://github.com/Tishacy/SciDownl.git
+scidownl>=1.3 
