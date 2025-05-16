@@ -1,24 +1,29 @@
 
 from pathlib import Path
 
-# ───────────────────── 2 ──────────────────────────────
-# NOW it is safe to import SciDownl (and everything that depends on it)
-import os, tempfile, importlib, sqlalchemy
+# ─────────────────────────  monkey-patch: MUST BE FIRST  ─────────────────────────
+import os, tempfile, importlib, functools
+from sqlalchemy import create_engine
 
-# 1. Choose any writable place (here the container's temp directory)
+# 1. Replacement engine that writes the SQLite file to /tmp instead of site-packages
 _tmp_db = os.path.join(tempfile.gettempdir(), "scidownl.db")
-
 def _tmp_engine(echo: bool = False, test: bool = False):
-    """Replacement for scidownl.db.entities.get_engine"""
-    return sqlalchemy.create_engine(
-        f"sqlite:///{_tmp_db}?check_same_thread=False", echo=echo
-    )
+    return create_engine(f"sqlite:///{_tmp_db}?check_same_thread=False", echo=echo)
 
-# 2. Load the module and monkey-patch the function
-entities = importlib.import_module("scidownl.db.entities")
-entities.get_engine = _tmp_engine
-# ─── now it's safe to pull in SciDownl ───
-from scidownl import scihub_download
+# 2. Wrap importlib.import_module so, the moment scidownl.db.entities is loaded,
+#    we overwrite its get_engine *before* create_tables() is ever called.
+_orig_import = importlib.import_module
+@functools.wraps(_orig_import)
+def _patched_import(name, *args, **kwargs):
+    mod = _orig_import(name, *args, **kwargs)
+    if name == "scidownl.db.entities":          # ← first time that sub-module appears
+        mod.get_engine = _tmp_engine            #   swap in our safe engine
+    return mod
+
+importlib.import_module = _patched_import
+# ─────────────────────────────────────────────────────────────────────────────────
+from scidownl import scihub_download         
+
 # --------------------------------------------------------------------
 # ❷  The rest of your imports and constants (unchanged)
 # --------------------------------------------------------------------
