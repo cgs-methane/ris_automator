@@ -2,4 +2,4 @@ selenium
 webdriver-manager
 requests
 rapidfuzz
-scidownl
+scidownl==0.2.4
