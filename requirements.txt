@@ -1,5 +1,7 @@
-selenium
-webdriver-manager
+streamlit
 requests
 rapidfuzz
 scidownl
+sqlalchemy
+selenium
+webdriver-manager
