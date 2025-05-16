@@ -1,9 +1,19 @@
 import os
 
-# ──────────────────── Fix SciDownl “unable to open database file” ────────────────────
-cache_dir = os.path.expanduser("~/.cache/scidownl")
-os.makedirs(cache_dir, exist_ok=True)
-import os
+# ─────── Create a writeable cache path ───────
+# Here we choose a folder inside your project, but you can
+# point this anywhere your Streamlit process can write.
+CACHE_DIR = os.path.join(os.getcwd(), "scidownl_cache")
+os.makedirs(CACHE_DIR, exist_ok=True)
+
+# ─────── Override SciDownl’s DB location ───────
+# Must do this *before* importing any of the core task code,
+# which tries to call create_tables() at import time.
+import scidownl.config as _sd_config
+_sd_config.config["db"]["file"] = os.path.join(CACHE_DIR, "scihub.db")
+
+# ─────── Now import the downloader safely ───────
+from scidownl.api.scihub import scihub_download
 import re
 import sys
 import time
