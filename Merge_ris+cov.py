@@ -5,6 +5,10 @@
 import os
 from pathlib import Path
 
+# ───────────────────── 2 ──────────────────────────────
+# NOW it is safe to import SciDownl (and everything that depends on it)
+from scidownl import scihub_download          # noqa: E402  (imported late on purpose)
+
 # --------------------------------------------------------------------
 # ❷  The rest of your imports and constants (unchanged)
 # --------------------------------------------------------------------
