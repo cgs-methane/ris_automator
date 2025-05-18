@@ -100,9 +100,9 @@ def fetch_via_scihub(doi: str, mirrors=SCI_HUB_MIRRORS):
             last_exc = exc
 
     # All mirrors failed → just warn and return None
-    st.warning("Sci-Hub mirrors unreachable for that DOI.")
+    st.warning("mirrors unreachable for that DOI.")
     # Optional: also log details to console for debugging
-    print("Sci-Hub crawl failed:", last_exc, flush=True)
+    print("crawl failed:", last_exc, flush=True)
     return None
 
 def strip_doi(text: str) -> str:
